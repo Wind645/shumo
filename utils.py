@@ -15,4 +15,7 @@ def calculate_distance(point1, point2, point3):
     return distance
 
 def is_sight_hidden(r, distance):
+    """
+    返回bool类型变量，输入云团半径r，还有云团中心到视线直线的距离，如果成功遮蔽
+    返回TRUE，反之False"""
     return r > distance

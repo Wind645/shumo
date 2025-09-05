@@ -35,79 +35,48 @@ def setup_mixed_font():
 
 setup_mixed_font()
 
-def create_dynamic_top_view():
-    """创建动态俯视图"""
+def create_dynamic_top_view(question2: bool=False):
+    """创建动态俯视图 (question2=True 时仅保留真假目标、M1、FY1)"""
     fig, ax = plt.subplots(figsize=(14, 10))
     
-    # 目标点设置（根据题目要求修正）
-    fake_target = np.array([0, 0])  # 假目标为原点
-    real_target = np.array([0, 200])  # 真目标圆心位置 (0, 200, 0)
+    # 目标点设置
+    fake_target = np.array([0, 0])
+    real_target = np.array([0, 200])
     
-    # 导弹初始位置和数据（根据题目精确设置）
+    # 导弹数据
     missiles_data = {
         'M1': {'pos': np.array([20000, 0]), 'color': 'orange'},
         'M2': {'pos': np.array([19000, 600]), 'color': 'orangered'},
         'M3': {'pos': np.array([18000, -600]), 'color': 'red'}
     }
-    
-    # 无人机初始位置和飞行参数配置（根据题目精确设置）
+    # 无人机数据
     drones_config = {
         'FY1': {
             'pos': np.array([17800, 0]), 
             'color': 'green',
-            'direction': np.array([-1, 0]),  # 可调整飞行方向
-            'speed': 120,  # 70-140 m/s范围内，题目问题1指定为120m/s
+            'direction': np.array([-1, 0]),
+            'speed': 120,
             'bombs': [
-                {'deploy_time': 1.5, 'explode_delay': 3.6},  # 题目问题1：1.5s后投放，3.6s后起爆
-                {'deploy_time': 5.0, 'explode_delay': 3.6},  # 间隔至少1秒
-                {'deploy_time': 8.5, 'explode_delay': 3.6}   # 间隔至少1秒
+                {'deploy_time': 1.5, 'explode_delay': 3.6},
+                {'deploy_time': 5.0, 'explode_delay': 3.6},
+                {'deploy_time': 8.5, 'explode_delay': 3.6}
             ]
         },
-        'FY2': {
-            'pos': np.array([12000, 1400]), 
-            'color': 'lime',
-            'direction': np.array([-0.8, -0.6]),
-            'speed': 110,  # 70-140 m/s范围内
-            'bombs': [
-                {'deploy_time': 2.0, 'explode_delay': 3.5},
-                {'deploy_time': 6.0, 'explode_delay': 3.7},
-                {'deploy_time': 10.0, 'explode_delay': 3.9}
-            ]
-        },
-        'FY3': {
-            'pos': np.array([6000, -3000]), 
-            'color': 'forestgreen',
-            'direction': np.array([-0.6, 0.8]),
-            'speed': 100,  # 70-140 m/s范围内
-            'bombs': [
-                {'deploy_time': 1.8, 'explode_delay': 3.3},
-                {'deploy_time': 5.5, 'explode_delay': 3.6},
-                {'deploy_time': 9.2, 'explode_delay': 4.0}
-            ]
-        },
-        'FY4': {
-            'pos': np.array([11000, 2000]), 
-            'color': 'darkgreen',
-            'direction': np.array([-0.9, -0.4]),
-            'speed': 130,  # 70-140 m/s范围内
-            'bombs': [
-                {'deploy_time': 2.2, 'explode_delay': 3.4},
-                {'deploy_time': 6.5, 'explode_delay': 3.8},
-                {'deploy_time': 10.8, 'explode_delay': 3.5}
-            ]
-        },
-        'FY5': {
-            'pos': np.array([13000, -2000]), 
-            'color': 'lightgreen',
-            'direction': np.array([-0.7, 0.7]),
-            'speed': 125,  # 70-140 m/s范围内
-            'bombs': [
-                {'deploy_time': 1.2, 'explode_delay': 3.6},
-                {'deploy_time': 4.8, 'explode_delay': 3.3},
-                {'deploy_time': 8.3, 'explode_delay': 3.7}
-            ]
-        }
+        'FY2': {'pos': np.array([12000, 1400]), 'color': 'lime','direction': np.array([-0.8, -0.6]),'speed': 110,'bombs': [{'deploy_time': 2.0,'explode_delay': 3.5},{'deploy_time': 6.0,'explode_delay': 3.7},{'deploy_time': 10.0,'explode_delay': 3.9}]},
+        'FY3': {'pos': np.array([6000, -3000]), 'color': 'forestgreen','direction': np.array([-0.6, 0.8]),'speed': 100,'bombs': [{'deploy_time': 1.8,'explode_delay': 3.3},{'deploy_time': 5.5,'explode_delay': 3.6},{'deploy_time': 9.2,'explode_delay': 4.0}]},
+        'FY4': {'pos': np.array([11000, 2000]), 'color': 'darkgreen','direction': np.array([-0.9, -0.4]),'speed': 130,'bombs': [{'deploy_time': 2.2,'explode_delay': 3.4},{'deploy_time': 6.5,'explode_delay': 3.8},{'deploy_time': 10.8,'explode_delay': 3.5}]},
+        'FY5': {'pos': np.array([13000, -2000]), 'color': 'lightgreen','direction': np.array([-0.7, 0.7]),'speed': 125,'bombs': [{'deploy_time': 1.2,'explode_delay': 3.6},{'deploy_time': 4.8,'explode_delay': 3.3},{'deploy_time': 8.3,'explode_delay': 3.7}]}
     }
+    # 第二题模式过滤
+    if question2:
+        missiles_data = {'M1': missiles_data['M1']}
+        drones_config = {'FY1': drones_config['FY1']}
+        # 第二题模式：只保留一枚烟幕弹
+        if len(drones_config['FY1']['bombs']) > 1:
+            drones_config['FY1']['bombs'] = [drones_config['FY1']['bombs'][0]]
+    
+    # 目标点设置（根据题目要求修正）
+    real_target = np.array([0, 200])  # 真目标圆心位置 (0, 200, 0)
     
     # 仿真参数（根据题目要求）
     missile_speed = 300  # m/s（题目明确指定）
@@ -128,7 +97,7 @@ def create_dynamic_top_view():
     missile_trajectories = {name: [data['pos'].copy()] for name, data in missiles_data.items()}
     drone_trajectories = {name: [config['pos'].copy()] for name, config in drones_config.items()}
     smoke_bombs = []  # 烟幕弹列表
-    deployed_bombs = {name: [] for name in drones_config.keys()}  # 记录已投放的烟幕弹
+    deployed_bombs = {name: [] for name in drones_config.keys()}  # 记录已投放的烟幕
     
     def animate(frame):
         ax.clear()
@@ -139,7 +108,7 @@ def create_dynamic_top_view():
         ax.set_ylim(-4000, 4000)
         ax.set_xlabel('X (m)', fontsize=12)
         ax.set_ylabel('Y (m)', fontsize=12)
-        ax.set_title(f'A题烟幕干扰弹投放策略仿真 - 时间: {current_time:.1f}s', fontsize=14, fontweight='bold')
+        ax.set_title(f'A题烟幕干扰弹投放策略仿真 - 时间: {current_time:.1f}s' + (' (第二题模式)' if question2 else ''), fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3)
         ax.set_aspect('equal')
         
@@ -164,6 +133,10 @@ def create_dynamic_top_view():
                 
                 ax.scatter(*new_pos, color=data['color'], s=200, marker='^', 
                           label=f'导弹{name}(300m/s)', zorder=4, edgecolors='black', linewidth=1)
+                # 添加导弹编号标注
+                ax.text(new_pos[0]+120, new_pos[1]+120, name, color=data['color'], fontsize=9,
+                        ha='left', va='bottom', weight='bold',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.6, edgecolor='none'))
                 
                 if len(missile_trajectories[name]) > 1:
                     traj = np.array(missile_trajectories[name])
@@ -182,6 +155,10 @@ def create_dynamic_top_view():
             
             ax.scatter(*new_pos, color=config['color'], s=150, marker='o', 
                       label=f'无人机{drone_name}({config["speed"]}m/s)', zorder=4, edgecolors='black', linewidth=1)
+            # 添加无人机编号标注
+            ax.text(new_pos[0]+120, new_pos[1]-120, drone_name, color=config['color'], fontsize=9,
+                    ha='left', va='top', weight='bold',
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.6, edgecolor='none'))
             
             # 绘制无人机轨迹
             if len(drone_trajectories[drone_name]) > 1:
@@ -200,6 +177,8 @@ def create_dynamic_top_view():
                     bomb_pos = new_pos.copy()
                     smoke_bombs.append({
                         'pos': bomb_pos.copy(),
+                        'init_pos': bomb_pos.copy(),              # 记录初始位置
+                        'h_vel': config['direction'][:2] * config['speed'],  # 水平速度(与无人机一致)
                         'deploy_time': current_time,
                         'exploded': False,
                         'explode_time': current_time + bomb['explode_delay'],
@@ -215,7 +194,7 @@ def create_dynamic_top_view():
             
             if not bomb['exploded'] and current_time >= bomb['explode_time']:
                 bomb['exploded'] = True
-                bomb['smoke_center'] = bomb['pos'].copy()
+                bomb['smoke_center'] = bomb['pos'].copy()  # 取爆炸瞬间更新后的位置
             
             if bomb['exploded']:
                 explosion_time = current_time - bomb['explode_time']
@@ -230,14 +209,15 @@ def create_dynamic_top_view():
                     ax.add_patch(smoke_circle)
                     ax.scatter(*smoke_center, color='gray', s=100, marker='*', zorder=4)
             else:
-                # 未爆炸的烟幕弹（重力作用下运动）
-                if bomb_time > 0:
-                    # 简化处理：在2D俯视图中只显示初始投放位置
+                # 未爆炸：抛物线运动 (水平匀速，当前无垂直轴显示，直接水平位移)
+                if bomb_time >= 0:
+                    bomb['pos'][0] = bomb['init_pos'][0] + bomb['h_vel'][0] * bomb_time
+                    bomb['pos'][1] = bomb['init_pos'][1] + bomb['h_vel'][1] * bomb_time
                     ax.scatter(*bomb['pos'], color='black', s=80, marker='o', zorder=4)
         
         # 添加详细信息
         total_deployed = len(smoke_bombs)
-        info_text = f"""仿真状态:
+        info_text = f"""仿真状态:{' (第二题模式)' if question2 else ''}
 时间: {current_time:.1f}s
 已投放烟幕弹: {total_deployed}枚
 活跃烟幕团: {active_smoke_count}个
@@ -265,9 +245,9 @@ def create_dynamic_top_view():
     
     return fig, ani
 
-def create_dynamic_simulation():
-    """创建3D动态仿真 - 强制3D模式"""
-    print("强制启动3D模式...")
+def create_dynamic_simulation(question2: bool=False):
+    """创建3D动态仿真 - question2=True 时仅保留真假目标、M1、FY1"""
+    print("强制启动3D模式..." + (" (第二题模式)" if question2 else ""))
     
     try:
         # Alternative 3D setup method
@@ -312,63 +292,18 @@ def create_dynamic_simulation():
     
     # 无人机初始位置和飞行参数配置（根据题目精确设置）
     drones_config = {
-        'FY1': {
-            'pos': np.array([17800, 0, 1800]), 
-            'color': 'green',
-            'direction': np.array([-1, 0, 0]),  # 等高度飞行
-            'speed': 120,  # 题目问题1指定速度
-            'bombs': [
-                {'deploy_time': 1.5, 'explode_delay': 3.6},  # 题目问题1参数
-                {'deploy_time': 5.0, 'explode_delay': 3.6},
-                {'deploy_time': 8.5, 'explode_delay': 3.6}
-            ]
-        },
-        'FY2': {
-            'pos': np.array([12000, 1400, 1400]), 
-            'color': 'lime',
-            'direction': np.array([-0.8, -0.6, 0]),  # 等高度飞行
-            'speed': 110,
-            'bombs': [
-                {'deploy_time': 2.0, 'explode_delay': 3.5},
-                {'deploy_time': 6.0, 'explode_delay': 3.7},
-                {'deploy_time': 10.0, 'explode_delay': 3.9}
-            ]
-        },
-        'FY3': {
-            'pos': np.array([6000, -3000, 700]), 
-            'color': 'forestgreen',
-            'direction': np.array([-0.6, 0.8, 0]),  # 等高度飞行
-            'speed': 100,
-            'bombs': [
-                {'deploy_time': 1.8, 'explode_delay': 3.3},
-                {'deploy_time': 5.5, 'explode_delay': 3.6},
-                {'deploy_time': 9.2, 'explode_delay': 4.0}
-            ]
-        },
-        'FY4': {
-            'pos': np.array([11000, 2000, 1800]), 
-            'color': 'darkgreen',
-            'direction': np.array([-0.9, -0.4, 0]),  # 等高度飞行
-            'speed': 130,
-            'bombs': [
-                {'deploy_time': 2.2, 'explode_delay': 3.4},
-                {'deploy_time': 6.5, 'explode_delay': 3.8},
-                {'deploy_time': 10.8, 'explode_delay': 3.5}
-            ]
-        },
-        'FY5': {
-            'pos': np.array([13000, -2000, 1300]), 
-            'color': 'lightgreen',
-            'direction': np.array([-0.7, 0.7, 0]),  # 等高度飞行
-            'speed': 125,
-            'bombs': [
-                {'deploy_time': 1.2, 'explode_delay': 3.6},
-                {'deploy_time': 4.8, 'explode_delay': 3.3},
-                {'deploy_time': 8.3, 'explode_delay': 3.7}
-            ]
-        }
+        'FY1': {'pos': np.array([17800, 0, 1800]), 'color': 'green','direction': np.array([-1, 0, 0]),'speed': 120,'bombs': [ {'deploy_time': 1.5,'explode_delay': 3.6},{'deploy_time': 5.0,'explode_delay': 3.6},{'deploy_time': 8.5,'explode_delay': 3.6} ]},
+        'FY2': {'pos': np.array([12000, 1400, 1400]), 'color': 'lime','direction': np.array([-0.8, -0.6, 0]),'speed': 110,'bombs': [{'deploy_time': 2.0,'explode_delay': 3.5},{'deploy_time': 6.0,'explode_delay': 3.7},{'deploy_time': 10.0,'explode_delay': 3.9}]},
+        'FY3': {'pos': np.array([6000, -3000, 700]), 'color': 'forestgreen','direction': np.array([-0.6, 0.8, 0]),'speed': 100,'bombs': [{'deploy_time': 1.8,'explode_delay': 3.3},{'deploy_time': 5.5,'explode_delay': 3.6},{'deploy_time': 9.2,'explode_delay': 4.0}]},
+        'FY4': {'pos': np.array([11000, 2000, 1800]), 'color': 'darkgreen','direction': np.array([-0.9, -0.4, 0]),'speed': 130,'bombs': [{'deploy_time': 2.2,'explode_delay': 3.4},{'deploy_time': 6.5,'explode_delay': 3.8},{'deploy_time': 10.8,'explode_delay': 3.5}]},
+        'FY5': {'pos': np.array([13000, -2000, 1300]), 'color': 'lightgreen','direction': np.array([-0.7, 0.7, 0]),'speed': 125,'bombs': [{'deploy_time': 1.2,'explode_delay': 3.6},{'deploy_time': 4.8,'explode_delay': 3.3},{'deploy_time': 8.3,'explode_delay': 3.7}]}
     }
-    
+    if question2:
+        missiles_data = {'M1': missiles_data['M1']}
+        drones_config = {'FY1': drones_config['FY1']}
+        # 第二题模式：只保留一枚烟幕弹
+        if len(drones_config['FY1']['bombs']) > 1:
+            drones_config['FY1']['bombs'] = [drones_config['FY1']['bombs'][0]]
     # 仿真参数（根据题目要求）
     missile_speed = 300  # m/s
     smoke_drop_speed = 3 # m/s (烟幕下沉速度)
@@ -404,7 +339,7 @@ def create_dynamic_simulation():
             ax.set_xlabel('X (m)', fontsize=12)
             ax.set_ylabel('Y (m)', fontsize=12)
             ax.set_zlabel('Z (m)', fontsize=12)
-            ax.set_title(f'A题烟幕干扰弹投放策略3D仿真 - 时间: {current_time:.1f}s', fontsize=14, fontweight='bold')
+            ax.set_title(f'A题烟幕干扰弹投放策略3D仿真 - 时间: {current_time:.1f}s' + (' (第二题模式)' if question2 else ''), fontsize=14, fontweight='bold')
             
             # 绘制假目标（原点）
             ax.scatter(*fake_target, color='red', s=300, marker='*', label='假目标(原点)', edgecolors='darkred', linewidth=2)
@@ -439,6 +374,10 @@ def create_dynamic_simulation():
                     # 绘制导弹
                     ax.scatter(*new_pos, color=data['color'], s=200, marker='^', 
                               label=f'导弹{name}', edgecolors='black', linewidth=1.5)
+                    # 3D导弹编号标注
+                    ax.text(new_pos[0], new_pos[1], new_pos[2]+120, name, color=data['color'], fontsize=9,
+                            ha='center', va='bottom', weight='bold',
+                            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.5, edgecolor='none'))
                     
                     # 绘制导弹轨迹
                     if len(missile_trajectories[name]) > 1:
@@ -455,6 +394,10 @@ def create_dynamic_simulation():
                 # 绘制无人机
                 ax.scatter(*new_pos, color=config['color'], s=150, marker='o', 
                           label=f'无人机{drone_name}', edgecolors='black', linewidth=1.5)
+                # 3D无人机编号标注
+                ax.text(new_pos[0], new_pos[1], new_pos[2]+120, drone_name, color=config['color'], fontsize=9,
+                        ha='center', va='bottom', weight='bold',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.5, edgecolor='none'))
                 
                 # 绘制无人机轨迹
                 if len(drone_trajectories[drone_name]) > 1:
@@ -474,6 +417,8 @@ def create_dynamic_simulation():
                         bomb_pos[2] -= 50  # 烟幕弹投放高度偏移
                         smoke_bombs.append({
                             'pos': bomb_pos.copy(),
+                            'init_pos': bomb_pos.copy(),               # 初始位置
+                            'h_vel': config['direction'] * config['speed'],  # 3D下完整水平速度向量(x,y,0)
                             'deploy_time': current_time,
                             'exploded': False,
                             'explode_time': current_time + bomb['explode_delay'],
@@ -490,7 +435,7 @@ def create_dynamic_simulation():
                 
                 if not bomb['exploded'] and current_time >= bomb['explode_time']:
                     bomb['exploded'] = True
-                    bomb['smoke_center'] = bomb['pos'].copy()
+                    bomb['smoke_center'] = bomb['pos'].copy()  # 取爆炸瞬间(抛物线末端)位置
                     print(f"烟幕弹在时间{current_time:.1f}s爆炸")
                 
                 if bomb['exploded']:
@@ -519,20 +464,24 @@ def create_dynamic_simulation():
                         z_v1 = smoke_center[2] + radius_smoke * np.sin(theta_smoke)
                         ax.plot(x_v1, y_v1, z_v1, 'gray', alpha=0.7, linewidth=2)
                 else:
-                    # 未爆炸的烟幕弹（重力作用下运动）
-                    if bomb_time > 0:
-                        fall_pos = bomb['pos'].copy()
-                        fall_pos[2] -= 0.5 * 9.8 * bomb_time**2  # 重力加速度
-                        if fall_pos[2] > 0:
-                            ax.scatter(*fall_pos, color='black', s=100, marker='o', edgecolors='red', linewidth=1)
+                    # 未爆炸：抛物线运动 (水平匀速 + 重力下降)
+                    if bomb_time >= 0:
+                        # 更新水平位置
+                        bomb['pos'][0] = bomb['init_pos'][0] + bomb['h_vel'][0] * bomb_time
+                        bomb['pos'][1] = bomb['init_pos'][1] + bomb['h_vel'][1] * bomb_time
+                        # 重力作用下降 (初速度为0, z = z0 - 1/2 g t^2)
+                        bomb['pos'][2] = bomb['init_pos'][2] - 0.5 * 9.8 * bomb_time**2
+                        if bomb['pos'][2] < 0:
+                            bomb['pos'][2] = 0  # 不低于地面
+                        ax.scatter(*bomb['pos'], color='black', s=100, marker='o', edgecolors='red', linewidth=1)
             
             # 添加详细信息面板
             total_deployed = len(smoke_bombs)
-            info_text = f"""3D仿真状态:
+            info_text = f"""3D仿真状态:{' (第二题模式)' if question2 else ''}
 时间: {current_time:.1f}s
 已投放烟幕弹: {total_deployed}枚
 活跃烟幕团: {active_smoke_count}个
-导弹飞行状态: {sum(1 for name, data in missiles_data.items() if current_time <= data['flight_time'])}/3
+导弹飞行状态: {sum(1 for name, data in missiles_data.items() if current_time <= data['flight_time'])}/{len(missiles_data)}
 
 题目参数:
 导弹速度: 300m/s
@@ -747,9 +696,10 @@ if __name__ == "__main__":
         print("\n请选择仿真模式 / Choose simulation mode:")
         print("1. 3D动态仿真 / 3D Dynamic Simulation (手动旋转)")
         print("2. 动态俯视图 / Dynamic Top View")
+        print("3. 第二题模式 (仅M1与FY1) / Question 2 Mode")
         print("0. 退出 / Exit")
         
-        choice = input("\n请输入选择 (0-2): ").strip()
+        choice = input("\n请输入选择 (0-3): ").strip()
         
         if choice == '1':
             print("\n启动3D动态仿真...")
@@ -783,6 +733,20 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"启动2D仿真时出错: {e}")
             
+        elif choice == '3':
+            print("\n启动第二题模式 (仅M1与FY1)...")
+            print("说明：只显示一枚导弹M1与一架无人机FY1及其投放烟幕弹效果，用于第二题分析。")
+            try:
+                fig3, ani3 = create_dynamic_simulation(question2=True)
+                plt.show()
+            except Exception as e:
+                print(f"第二题3D模式出错: {e}")
+                print("尝试使用俯视图...")
+                try:
+                    fig4, ani4 = create_dynamic_top_view(question2=True)
+                    plt.show()
+                except Exception as e2:
+                    print(f"第二题俯视图模式出错: {e2}")
         elif choice == '0':
             print("退出程序 / Exiting program.")
             break

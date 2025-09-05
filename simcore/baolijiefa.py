@@ -70,7 +70,7 @@ class CylinderOcclusionJudge:
     def _segment_intersects_sphere(V: np.ndarray, P: np.ndarray, S: np.ndarray, R: float) -> bool:
         """
         线段 VP 与球(S,R) 是否相交（存在交点且在 t∈[0,1]）。
-        方程 |V + t(P-V) - S|^2 = R^2 => a t^2 + b t + c = 0
+        方向方程 |V + t(P-V) - S|^2 = R^2 => a t^2 + b t + c = 0
         """
         V = np.asarray(V, float)
         P = np.asarray(P, float)
@@ -78,7 +78,6 @@ class CylinderOcclusionJudge:
         d = P - V
         a = np.dot(d, d)
         if a == 0.0:
-            # V==P，退化为点：判断该点是否在球内（在内 => 视为被遮挡）
             return np.dot(V - S, V - S) <= R * R
         b = 2.0 * np.dot(d, V - S)
         c = np.dot(V - S, V - S) - R * R
@@ -88,7 +87,6 @@ class CylinderOcclusionJudge:
         sqrt_disc = np.sqrt(max(0.0, disc))
         t1 = (-b - sqrt_disc) / (2.0 * a)
         t2 = (-b + sqrt_disc) / (2.0 * a)
-        # 线段相交：任一根在 [0,1] 上即可
         return (0.0 <= t1 <= 1.0) or (0.0 <= t2 <= 1.0)
 
     def _sample_cylinder_points(self) -> np.ndarray:
@@ -99,22 +97,15 @@ class CylinderOcclusionJudge:
         """
         x0, y0, z0 = self.C_base
         z1 = z0 + self.h_cyl
-        # 自底到顶等距层
         zs = np.linspace(z0, z1, self.n_h + 1)
         thetas = np.linspace(0.0, 2.0 * np.pi, self.n_theta, endpoint=False)
-
         pts = []
-
-        # 侧面样本：固定半径 r_cyl
         for z in zs:
             for th in thetas:
                 x = x0 + self.r_cyl * np.cos(th)
                 y = y0 + self.r_cyl * np.sin(th)
                 pts.append((x, y, z))
-
-        # 端面样本：自中心到半径 r_cyl 的若干环（含中心）
         if self.check_caps:
-            # 半径采用 sqrt 均匀 => 面积更均匀
             if self.n_cap_radial == 1:
                 radii = [0.0]
             else:
@@ -128,14 +119,9 @@ class CylinderOcclusionJudge:
                             x = x0 + r * np.cos(th)
                             y = y0 + r * np.sin(th)
                             pts.append((x, y, z_cap))
-
         return np.asarray(pts, dtype=float)
 
     def is_fully_occluded(self) -> CylinderOcclusionResult:
-        """
-        采样判定：若所有采样点的线段 VP 与球体(S,R) 相交，则视为完全遮挡。
-        """
-        # 快速剪枝：观察点在球内 => 球遮一切方向
         if np.linalg.norm(self.S - self.V) <= self.R:
             pts = self._sample_cylinder_points()
             return CylinderOcclusionResult(
@@ -143,11 +129,9 @@ class CylinderOcclusionJudge:
                 total_points=pts.shape[0],
                 blocked_points=pts.shape[0],
                 uncovered_indices=[],
-                extra=dict(reason="observer_inside_sphere")
+                extra=dict(reason="observer_inside_sphere"),
             )
-
         pts = self._sample_cylinder_points()
-
         blocked = 0
         uncovered_idx: List[int] = []
         for i, P in enumerate(pts):
@@ -157,12 +141,7 @@ class CylinderOcclusionJudge:
             else:
                 if len(uncovered_idx) < self.max_uncovered_report:
                     uncovered_idx.append(i)
-                # 可早停：发现未遮挡即可认为不是“完全遮挡”
-                # 但这里继续统计 blocked，以便返回统计更完整
-                # break
-
         occluded = (blocked == pts.shape[0])
-
         return CylinderOcclusionResult(
             occluded=occluded,
             total_points=int(pts.shape[0]),
@@ -172,36 +151,6 @@ class CylinderOcclusionJudge:
                 n_theta=self.n_theta,
                 n_h=self.n_h,
                 n_cap_radial=self.n_cap_radial,
-                check_caps=self.check_caps
-            )
+                check_caps=self.check_caps,
+            ),
         )
-
-
-if __name__ == "__main__":
-    # Demo & 简单测速
-    V = np.array([0.0, 0.0, 2.0])          # 观察点
-    S = np.array([0.2, 0.1, 1.0])          # 遮挡球心
-    R = 0.6                                # 遮挡球半径
-
-    C_base = np.array([0.5, 0.0, 0.0])     # 圆柱底面圆心
-    r_cyl = 0.3                             # 圆柱半径
-    h_cyl = 0.8                             # 圆柱高度（沿 z）
-
-    judge = CylinderOcclusionJudge(
-        V, S, R, C_base, r_cyl, h_cyl,
-        n_theta=48, n_h=16, n_cap_radial=6, check_caps=True
-    )
-    res = judge.is_fully_occluded()
-    print("完全遮挡(采样法):", res.occluded)
-    print(f"采样点: {res.blocked_points}/{res.total_points} 被遮挡")
-    if not res.occluded:
-        print("部分未遮挡样本索引:", res.uncovered_indices[:8])
-
-    # 粗略耗时
-    import time
-    t0 = time.time()
-    runs = 200
-    for _ in range(runs):
-        judge.is_fully_occluded()
-    t1 = time.time()
-    print(f"平均耗时: {(t1 - t0)/runs*1e6:.1f} μs")

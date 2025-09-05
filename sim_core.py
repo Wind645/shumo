@@ -23,7 +23,7 @@ def run_problem1(
     n_h: int = 16,
     n_cap_radial: int = 6,
     check_caps: bool = True,
-    occlusion_method: str = "sampling",
+    occlusion_method: str = "judge_caps",
     verbose: bool = False,
 ) -> Dict:
     fake_target = np.array([0.0, 0.0, 0.0], dtype=float)
@@ -53,5 +53,5 @@ def run_problem1(
     return res
 
 if __name__ == "__main__":
-    out = run_problem1(dt=0.02, verbose=True, occlusion_method="judge_caps")
-    print(f"[Q1] 有效遮蔽总时长 ≈ {out['occluded_time']:.3f} s")
+    out = run_problem1(dt=0.00005, verbose=True, occlusion_method="judge_caps")
+    print(f"[Q1] 有效遮蔽总时长 ≈ {out['occluded_time']:.10f} s")

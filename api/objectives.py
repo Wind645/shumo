@@ -8,7 +8,7 @@ SPEED_MAX = 140.0
 def _penalty_value(base: float, factor: float = 1e6) -> float:
     return base - factor
 
-def objective_q2_vector(x: Iterable[float], *, method: str = "sampling", dt: float = 0.05) -> float:
+def objective_q2_vector(x: Iterable[float], *, method: str = "judge_caps", dt: float = 0.05) -> float:
     xs = list(map(float, x))
     if len(xs) != 4:
         return _penalty_value(0.0)
@@ -18,7 +18,7 @@ def objective_q2_vector(x: Iterable[float], *, method: str = "sampling", dt: flo
     res = evaluate_problem2(speed=speed, azimuth=azim, release_time=t_rel, explode_delay=dly, occlusion_method=method, dt=dt)
     return -float(res["occluded_time"]["M1"])  # minimize
 
-def objective_q3_vector(x: Iterable[float], *, method: str = "sampling", dt: float = 0.05) -> float:
+def objective_q3_vector(x: Iterable[float], *, method: str = "judge_caps", dt: float = 0.05) -> float:
     xs = list(map(float, x))
     if len(xs) != 8:
         return _penalty_value(0.0)
@@ -35,7 +35,7 @@ def objective_q3_vector(x: Iterable[float], *, method: str = "sampling", dt: flo
     res = evaluate_problem3(bombs=ts_ds, speed=speed, azimuth=azim, dt=dt, occlusion_method=method)
     return -float(res["occluded_time"]["M1"])  # minimize
 
-def objective_q4_vector(x: Iterable[float], *, method: str = "sampling", dt: float = 0.05) -> float:
+def objective_q4_vector(x: Iterable[float], *, method: str = "judge_caps", dt: float = 0.05) -> float:
     xs = list(map(float, x))
     if len(xs) != 12:
         return _penalty_value(0.0)

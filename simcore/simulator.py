@@ -21,7 +21,7 @@ class Simulator:
     smoke_radius: float = SMOKE_RADIUS_DEFAULT
     smoke_lifetime: float = SMOKE_LIFETIME_DEFAULT
     smoke_descent: float = SMOKE_DESCENT_DEFAULT
-    occlusion_method: str = "sampling"
+    occlusion_method: str = "judge_caps"
     schedules: List[Tuple[int, float, float]] = field(default_factory=list)
 
     def run(self, dt: float, t_max: Optional[float] = None, verbose: bool = False) -> Dict:

@@ -9,7 +9,7 @@ def evaluate_problem2(
     azimuth: Optional[float] = None,
     explode_delay: float = 3.6,
     release_time: float = 1.5,
-    occlusion_method: str = "sampling",
+    occlusion_method: str = "judge_caps",
     dt: float = 0.05,
 ) -> Dict:
     fy1 = {
@@ -32,7 +32,7 @@ def evaluate_problem3(
     azimuth: Optional[float] = None,
     direction: Optional[Iterable[float]] = None,
     dt: float = 0.05,
-    occlusion_method: str = "sampling",
+    occlusion_method: str = "judge_caps",
 ) -> Dict:
     fy1 = {
         "pos0": [17800.0, 0.0, 1800.0],
@@ -48,10 +48,10 @@ def evaluate_problem3(
     decision = {"drones": [fy1]}
     return simulate_with_decision(decision, which="M1", dt=dt, occlusion_method=occlusion_method)
 
-def evaluate_problem4(drones_spec: List[Dict], dt: float = 0.05, occlusion_method: str = "sampling") -> Dict:
+def evaluate_problem4(drones_spec: List[Dict], dt: float = 0.05, occlusion_method: str = "judge_caps") -> Dict:
     decision = {"drones": drones_spec}
     return simulate_with_decision(decision, which="M1", dt=dt, occlusion_method=occlusion_method)
 
-def evaluate_problem5(drones_spec: List[Dict], dt: float = 0.05, occlusion_method: str = "sampling") -> Dict:
+def evaluate_problem5(drones_spec: List[Dict], dt: float = 0.05, occlusion_method: str = "judge_caps") -> Dict:
     decision = {"drones": drones_spec}
     return simulate_with_decision(decision, which="M1M2M3", dt=dt, occlusion_method=occlusion_method)

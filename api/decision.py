@@ -99,7 +99,7 @@ def _eval_occlusion_over_timeline(missiles: Dict[str, Missile], timeline: List[D
 def simulate_with_decision(
     decision: Dict,
     which: Union[str, List[str]] = "M1",
-    *, dt: float = 0.05, occlusion_method: str = "sampling", verbose: bool = False, return_timeline: bool = False,
+    *, dt: float = 0.05, occlusion_method: str = "judge_caps", verbose: bool = False, return_timeline: bool = False,
 ) -> Dict:
     drones, schedules = build_drones_and_schedules(decision)
     missiles = _build_missiles(which)

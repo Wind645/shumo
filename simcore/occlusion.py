@@ -10,7 +10,7 @@ Vec3 = np.ndarray
 
 class OcclusionEvaluator:
     def __init__(self, cyl: Cylinder, n_theta: int = 48, n_h: int = 16,
-                 n_cap_radial: int = 6, check_caps: bool = True, method: str = "sampling"):
+                 n_cap_radial: int = 6, check_caps: bool = True, method: str = "judge_caps"):
         self.cyl = cyl
         self.n_theta = int(max(4, n_theta))
         self.n_h = int(max(2, n_h))
@@ -18,7 +18,7 @@ class OcclusionEvaluator:
         self.check_caps = bool(check_caps)
         self.method = method
         self._pts = None
-        if self.method == "sampling":
+        if self.method == "judge_caps":
             self._sampler = CylinderOcclusionJudge(
                 V=np.array([0.0, 0.0, 1.0]),
                 S=np.array([0.0, 0.0, 2.0]),

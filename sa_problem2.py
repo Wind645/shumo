@@ -85,15 +85,15 @@ CONFIG = dict(
 # Bounds / defaults
 SPEED_MIN, SPEED_MAX = 70.0, 140.0
 AZIM_MIN, AZIM_MAX = 0.0, 2.0 * math.pi
-RELEASE_MAX_DEFAULT = 30.0          # 可调: 最大投放时间 (s)
-DELAY_MIN, DELAY_MAX_DEFAULT = 0.2, 10.0   # 起爆延迟范围 (s)
+RELEASE_MAX_DEFAULT = 66.0          # 可调: 最大投放时间 (s)
+DELAY_MIN, DELAY_MAX_DEFAULT = 0.0, 20.0   # 起爆延迟范围 (s)
 
 # Annealing defaults
 T0_DEFAULT = 1.0        # 初始温度 (对单位=秒的 occlusion_time, 一般 0~若干秒)
 T_END_DEFAULT = 1e-3
 ALPHA_DEFAULT = 0.985   # 降温因子
 STEPS_PER_T_DEFAULT = 50
-NO_IMPROVE_STOP = 2000  # 早停: 若超此步无提升
+NO_IMPROVE_STOP = 200000  # 早停: 若超此步无提升
 
 # ---------------- 高级扰动 / 退火策略辅助 ----------------
 

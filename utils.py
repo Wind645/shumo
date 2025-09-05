@@ -249,5 +249,3 @@ def circle_fully_occluded_by_sphere(V, C, r, S, R, return_debug=False):
     if return_debug:
         return occluded, dict(f_min=float(f_min), cos_alpha_s=float(cos_alpha_s), t_min=float(t_min))
     return occluded
-
-

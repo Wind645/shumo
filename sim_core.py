@@ -50,9 +50,9 @@ def run_problem1(
         )
         res = sim.run(dt=dt, t_max=None, verbose=verbose)
         if verbose:
-            print(f"有效遮蔽时长: {res['occluded_time']:.3f} s / 导弹总飞行 {res['missile_flight_time']:.3f} s")
+            print(f"有效遮蔽时长: {res['occluded_time']:.5f} s / 导弹总飞行 {res['missile_flight_time']:.3f} s")
         return res
 
 if __name__ == "__main__":
     out = run_problem1(dt=0.005, verbose=True, occlusion_method="judge_caps")
-    print(f"[Q1] 有效遮蔽总时长 ≈ {out['occluded_time']:.3f} s")
+    print(f"[Q1] 有效遮蔽总时长 ≈ {out['occluded_time']:.10f} s")

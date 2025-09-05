@@ -1,11 +1,10 @@
-from __future__ import annotations
-import numpy as np
+import torch
 
 G = 9.8  # m/s^2
 SMOKE_RADIUS_DEFAULT = 10.0
 SMOKE_LIFETIME_DEFAULT = 20.0
 SMOKE_DESCENT_DEFAULT = 3.0
 
-C_BASE_DEFAULT = np.array([0.0, 200.0, 0.0], dtype=float)
+C_BASE_DEFAULT = torch.tensor([0.0, 200.0, 0.0], dtype=torch.float)
 R_CYL_DEFAULT = 7.0
 H_CYL_DEFAULT = 10.0

@@ -40,7 +40,7 @@ from optimizer_api import evaluate_problem2
 CONFIG = dict(
     # 基础仿真 / 目标
     method="judge_caps",          # 遮蔽判定方法: 'judge_caps' (快, 保守) 或 'sampling' (慢, 精细)
-    dt=0.01,                       # 仿真时间步 (s) 适中:0.05  精细:0.02  粗略:0.1
+    dt=0.02,                       # 仿真时间步 (s) 适中:0.05  精细:0.02  粗略:0.1
     rel_max=66.0,                  # 投放时间搜索上界 (s)
     delay_max=20.0,                # 起爆延迟搜索上界 (s)
 
@@ -49,7 +49,7 @@ CONFIG = dict(
     t_end=1e-3,                    # 终止温度阈值
     alpha=0.988,                   # 每轮降温因子 (越接近1 降温越慢)
     steps_per_t=60,                # 每个温度水平的 Metropolis 迭代次数
-    max_steps=25000,               # 总步数上限 (主控迭代预算)
+    max_steps=20000,               # 总步数上限 (主控迭代预算)
     seed=42,                       # 随机种子 (改为 None 使用系统随机)
 
     # 邻域与探索强度
@@ -76,7 +76,7 @@ CONFIG = dict(
     verbose=False,                 # 输出详细 step 级日志 (配合 log_every)
     log_every=500,                 # 每多少步输出一次 verbose 行
     checkpoint_file="best_p2.json", # 最优解保存文件 (空字符串代表不保存)
-    ckpt_steps=2000,               # 每 N 步保存 (0=关闭)
+    ckpt_steps=20000,               # 每 N 步保存 (0=关闭)
     ckpt_seconds=0,                # 每 N 秒保存 (0=关闭)
     ckpt_on_improve=True,          # 一旦提升立即保存
 )
@@ -91,7 +91,7 @@ DELAY_MIN, DELAY_MAX_DEFAULT = 0.0, 20.0   # 起爆延迟范围 (s)
 # Annealing defaults
 T0_DEFAULT = 1.0        # 初始温度 (对单位=秒的 occlusion_time, 一般 0~若干秒)
 T_END_DEFAULT = 1e-3
-ALPHA_DEFAULT = 0.985   # 降温因子
+ALPHA_DEFAULT = 0.98   # 降温因子
 STEPS_PER_T_DEFAULT = 50
 NO_IMPROVE_STOP = 2000  # 早停: 若超此步无提升
 

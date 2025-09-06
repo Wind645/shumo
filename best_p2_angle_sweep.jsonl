@@ -1,0 +1,2 @@
+{"azimuth": 0.0, "azimuth_deg": 0.0, "speed": 118.55909670422072, "release_time": 1.7376319326610368, "explode_delay": 2.892842952595291, "value": 0.0, "explode_at": 4.630474885256328, "found_nonzero": false, "seed": 42, "method": "judge_caps", "dt": 0.01}
+{"azimuth": 0.1, "azimuth_deg": 5.729577951308233, "speed": 112.6167839765518, "release_time": 1.4919827991831351, "explode_delay": 4.357062735503635, "value": 0.0, "explode_at": 5.84904553468677, "found_nonzero": false, "seed": 42, "method": "judge_caps", "dt": 0.01}

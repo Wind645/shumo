@@ -116,12 +116,17 @@ class Simulator:
     """
     Runs scenarios for problems 1–5 and post-processes occlusion time.
 
-    Occlusion rule:
-      - Each smoke is an effective obscuring sphere of radius 10 m
-        for 20 s after detonation while it sinks vertically.
-      - Target is the fixed sphere (center (0,200,5), radius sqrt(74))
-      - A missile is 'occluded' at a timestep if any active smoke
-        blocks LOS to the target sphere (batch computed).
+    Occlusion rule (STRICT full coverage version):
+      - Each smoke is a sphere of radius 10 m, lifetime 20 s, sinking at 3 m/s.
+      - Target lateral geometry is approximated with radius 7.0 m (cylinder horizontal radius),
+        center at (0, 200, 5). (Previous looser outer bounding sphere logic removed.)
+      - A missile is 'occluded' in a timestep ONLY if there exists at least one smoke sphere
+        whose angular disc (as seen from the missile) fully covers the target's angular disc.
+        Mathematically: θ_smoke >= θ_target + φ, where
+            θ_smoke = arcsin(R_smoke / d_smoke),
+            θ_target = arcsin(R_target / d_target),
+            φ = angular separation between target center direction and smoke center direction.
+      - Partial / grazing overlap no longer counts; legacy 'partial' mode has been removed.
     """
 
     def __init__(self, problem_id: int, dt: float = 0.01, strategy=None):

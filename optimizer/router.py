@@ -1,17 +1,25 @@
-"""简单路由: 通过修改下方常量选择题目与算法 (不使用命令行参数)。
+"""统一优化路由入口: 通过修改下方常量选择题目、算法与评估方式。
 
-默认: problem=2, algo='hybrid'.
+支持题号: 2,3,4,5 (问题1 为固定策略评估, 通常无需优化, 可按需扩展)。
 
-编码 (problem>=3): [speed, azimuth, t1,d1,t2,d2,...]
+通用编码参见 `optimizer/spec.py`:
+    - Q2: [speed, azimuth, t_rel, explode_delay]
+    - Q3: [speed, azimuth, (t1,d1)...]
+    - Q4: 3 架无人机各 1 枚: [s1,a1,t1,d1, s2,a2,t2,d2, s3,a3,t3,d3]
+    - Q5: 5 架无人机, 每架 bombs_count 枚: per-drone block 依次拼接。
+
+可选择 occlusion_method: 'sampling' | 'judge_caps' | 'vectorized_sampling'
+（向量化采样仅当前实现 M1 单导弹, 自动在问题 2,3,4,5 单导弹场景使用）。
 """
 from __future__ import annotations
 
 # ==================== 可编辑区 ====================
-PROBLEM = 3                 # 2 / 3 / 4 / 5
-ALGO = 'sa'             # 'hybrid' | 'ga' | 'pso' | 'sa'
-BOMBS_COUNT = 2             # problem>=3 时炸弹数 (编码长度会随之变化)
+PROBLEM = 3                  # 2 / 3 / 4 / 5
+ALGO = 'sa'                  # 'ga' | 'pso' | 'sa'
+BOMBS_COUNT = 2              # problem=3/5 时炸弹数 (编码长度随之变化)
 DT = 0.02
-BACKEND = 'rough'  # 仅 problem=2 时有效
+OCCLUSION_METHOD = 'judge_caps'  # 'sampling' | 'judge_caps' | 'vectorized_sampling'
+BACKEND = 'rough'            # (保留占位, 新统一实现暂不区分 backend)
 SEED = None
 VERBOSE = False
 
@@ -27,59 +35,41 @@ _DEF_SA_ITERS = 4000
 # ==================================================
 
 def run():
-    prob = PROBLEM
-    algo = ALGO
-    if algo == 'hybrid':
-        from optimizer.hybrid import solve_q2_hybrid
-        if prob != 2:
-            print('[WARN] hybrid 仅支持 problem=2, 已强制使用 2')
-            prob = 2
-        res = solve_q2_hybrid(
-            sa_iters = ITERS or _DEF_HYBRID_ITERS,
-            dt = DT,
-            judge_backend = BACKEND,
-            seed = SEED,
-            verbose = VERBOSE,
-        )
-        print('HYBRID RESULT', res.best_x, res.best_value, res.best_eval.get('total'))
-    elif algo == 'ga':
-        from optimizer.ga_q2 import solve_q2_ga
-        res = solve_q2_ga(
-            n_generations = GA_GENERATIONS or ITERS or _DEF_GA_GENS,
-            dt = DT,
-            judge_backend = (BACKEND if prob==2 else None),
-            problem = prob,
-            bombs_count = BOMBS_COUNT,
-            verbose = VERBOSE,
-            seed = SEED,
-        )
-        print('GA RESULT', res.best_x, res.best_value, res.best_eval.get('total'))
+    prob = PROBLEM; algo = ALGO
+    from optimizer.algorithms import solve_ga, solve_pso, solve_sa
+    if algo == 'ga':
+        res = solve_ga(
+            problem=prob,
+            bombs_count=BOMBS_COUNT,
+            generations=GA_GENERATIONS or ITERS or _DEF_GA_GENS,
+            dt=DT,
+            method=OCCLUSION_METHOD,
+            seed=SEED,
+            verbose=VERBOSE,
+        ); tag='GA'
     elif algo == 'pso':
-        from optimizer.pso_q2 import solve_q2_pso
-        res = solve_q2_pso(
-            iters = ITERS or _DEF_PSO_ITERS,
-            dt = DT,
-            problem = prob,
-            bombs_count = BOMBS_COUNT,
-            use_vectorized = (prob==2),
-            verbose = VERBOSE,
-            seed = SEED,
-        )
-        print('PSO RESULT', res.best_x, res.best_value, res.best_eval.get('total'))
+        res = solve_pso(
+            problem=prob,
+            bombs_count=BOMBS_COUNT,
+            iters=ITERS or _DEF_PSO_ITERS,
+            dt=DT,
+            method=OCCLUSION_METHOD,
+            seed=SEED,
+            verbose=VERBOSE,
+        ); tag='PSO'
     elif algo == 'sa':
-        from optimizer.sa_q2 import solve_q2_sa
-        res = solve_q2_sa(
-            iters = ITERS or _DEF_SA_ITERS,
-            dt = DT,
-            problem = prob,
-            bombs_count = BOMBS_COUNT,
-            use_vectorized = (prob==2),
-            verbose = VERBOSE,
-            seed = SEED,
-        )
-        print('SA RESULT', res.best_x, res.best_value, res.best_eval.get('total'))
+        res = solve_sa(
+            problem=prob,
+            bombs_count=BOMBS_COUNT,
+            iters=ITERS or _DEF_SA_ITERS,
+            dt=DT,
+            method=OCCLUSION_METHOD,
+            seed=SEED,
+            verbose=VERBOSE,
+        ); tag='SA'
     else:
         raise SystemExit('未知 ALGO')
+    print(f'{tag} RESULT', res.best_x, res.best_value, res.best_eval.get('total'))
 
 if __name__ == '__main__':
     run()

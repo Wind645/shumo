@@ -5,12 +5,14 @@ from simcore import (
     Missile, Drone, Cylinder, Simulator, OcclusionEvaluator,
     C_BASE_DEFAULT, R_CYL_DEFAULT, H_CYL_DEFAULT,
     SMOKE_DESCENT_DEFAULT, SMOKE_LIFETIME_DEFAULT, SMOKE_RADIUS_DEFAULT,
+    MISSILES_POS0, MISSILE_SPEED, DRONES_POS0, DRONE_SPEED_MIN, DRONE_SPEED_MAX, MIN_BOMB_INTERVAL,
+    FAKE_TARGET_ORIGIN,
 )
 
 Vec3 = np.ndarray
-FAKE_TARGET = np.array([0.0, 0.0, 0.0], dtype=float)
-SPEED_MIN = 70.0
-SPEED_MAX = 140.0
+FAKE_TARGET = FAKE_TARGET_ORIGIN.astype(float)
+SPEED_MIN = DRONE_SPEED_MIN
+SPEED_MAX = DRONE_SPEED_MAX
 
 def _as_vec3(x) -> Vec3:
     return np.asarray(x, dtype=float).reshape(3)
@@ -28,8 +30,8 @@ def azimuth_to_dir(azim_rad: float) -> Vec3:
 def _validate_bombs(bombs: List[Dict]):
     times = sorted(float(b["deploy_time"]) for b in bombs)
     for i in range(1, len(times)):
-        if times[i] - times[i-1] < 1.0 - 1e-9:
-            raise ValueError(f"同一无人机投弹间隔不足1秒: {times[i-1]} -> {times[i]}")
+        if times[i] - times[i-1] < MIN_BOMB_INTERVAL - 1e-9:
+            raise ValueError(f"同一无人机投弹间隔不足{MIN_BOMB_INTERVAL}秒: {times[i-1]} -> {times[i]}")
 
 def build_drones_and_schedules(decision: Dict) -> Tuple[List[Drone], List[Tuple[int, float, float]]]:
     drones: List[Drone] = []
@@ -59,9 +61,8 @@ def build_drones_and_schedules(decision: Dict) -> Tuple[List[Drone], List[Tuple[
     return drones, schedules
 
 MISSILES_DEF = {
-    "M1": dict(pos0=np.array([20000.0, 0.0, 2000.0]), speed=300.0, target=FAKE_TARGET),
-    "M2": dict(pos0=np.array([19000.0, 600.0, 2100.0]), speed=300.0, target=FAKE_TARGET),
-    "M3": dict(pos0=np.array([18000.0, -600.0, 1900.0]), speed=300.0, target=FAKE_TARGET),
+    name: dict(pos0=pos.astype(float), speed=MISSILE_SPEED, target=FAKE_TARGET)
+    for name, pos in MISSILES_POS0.items()
 }
 
 def _build_missiles(which: Union[str, List[str]]) -> Dict[str, Missile]:

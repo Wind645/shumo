@@ -105,7 +105,8 @@ def simulate_with_decision(
     missiles = _build_missiles(which)
     T_max = _max_flight_time(missiles)
     first_missile: Missile = list(missiles.values())[0]
-    cyl = Cylinder(C_base=C_BASE_DEFAULT.copy(), r=R_CYL_DEFAULT, h=H_CYL_DEFAULT)
+    # C_BASE_DEFAULT is a torch.Tensor; use clone() not copy()
+    cyl = Cylinder(C_base=C_BASE_DEFAULT.clone(), r=R_CYL_DEFAULT, h=H_CYL_DEFAULT)
     sim = Simulator(
         missile=first_missile,
         drones=drones,

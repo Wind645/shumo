@@ -1,13 +1,24 @@
-"""Performance comparison between sampling method, original judge, and vectorized judge.
+"""Performance comparison among:
+    - sampling (可选, 很慢)
+    - original 精确算法
+    - vectorized 精确 (NumPy)
+    - rough 近似 (单例/批量)
 
-新增: 通过设置顶部变量 `SKIP_SAMPLING` (或命令行参数 `--no-sampling`) 可以跳过
-耗时的 sampling 方法，仅比较原始算法与向量化/torch 实现，以加速性能测试。
+Torch 版本已移除。
+
+通过设置顶部变量 `SKIP_SAMPLING` (或命令行参数 `--no-sampling`) 可以跳过耗时 sampling。
 """
 
 import numpy as np
 import time
 from judge import OcclusionJudge
 from vectorized_judge import VectorizedOcclusionJudge
+from rough_judge import RoughOcclusionJudge, RoughVectorizedOcclusionJudge
+try:
+    from rough_judge_torch import TorchRoughVectorizedOcclusionJudge
+    TORCH_ROUGH_AVAILABLE = True
+except Exception:
+    TORCH_ROUGH_AVAILABLE = False
 import sys
 
 # ---------------------------------------------------------------------------
@@ -15,6 +26,7 @@ import sys
 # 也可在命令行运行: uv run performance_comparison.py --no-sampling
 # ---------------------------------------------------------------------------
 SKIP_SAMPLING = True
+# Torch 已删除
 CASENUM = 20000
 
 
@@ -68,16 +80,16 @@ def sampling_method(V, C, r, S, R, n_samples=1000):
 
 
 def test_performance_comparison(skip_sampling: bool = False):
-    """Compare performance of occlusion methods on 500 test cases.
+    """Compare performance of occlusion methods.
 
     Args:
         skip_sampling: 如果为 True, 不执行耗时的 sampling 方法。
     """
     print("=== Performance Comparison Test ===\n")
     if skip_sampling:
-        print("[模式] 仅比较 Original 与 Vectorized (跳过 Sampling)\n")
+        print("[模式] 比较 Original / Vectorized / Rough / Rough(Vectorized) (跳过 Sampling)\n")
     else:
-        print("[模式] 比较 Sampling / Original / Vectorized\n")
+        print("[模式] 比较 Sampling / Original / Vectorized / Rough / Rough(Vectorized)\n")
     print("Generating 500 random test cases...")
     
     # Generate 500 test cases
@@ -148,22 +160,78 @@ def test_performance_comparison(skip_sampling: bool = False):
         'results': vectorized_results
     }
     print(f"   Time: {vectorized_time:.4f} seconds ({N/vectorized_time:.1f} cases/sec)")
+
+    # Test 4: Rough (single) method
+    label_rough_single = "3." if skip_sampling else "4."
+    print(f"{label_rough_single} Testing rough (single) method...")
+    start_time = time.time()
+    rough_single_results = []
+    for i in range(N):
+        rj = RoughOcclusionJudge(V_batch[i], C_batch[i], r_batch[i], S_batch[i], R_batch[i])
+        res = rj.is_fully_occluded()
+        rough_single_results.append(res.occluded)
+    rough_single_time = time.time() - start_time
+    results['rough_single'] = {
+        'time': rough_single_time,
+        'results': rough_single_results
+    }
+    print(f"   Time: {rough_single_time:.4f} seconds ({N/rough_single_time:.1f} cases/sec)")
+
+    # Test 5: Rough Vectorized method
+    label_rough_vec = "4." if skip_sampling else "5."
+    print(f"{label_rough_vec} Testing rough vectorized method...")
+    start_time = time.time()
+    rough_vec_judge = RoughVectorizedOcclusionJudge()
+    rough_vec_res = rough_vec_judge.judge_batch(V_batch, C_batch, r_batch, S_batch, R_batch)
+    rough_vec_results = rough_vec_res.occluded.tolist()
+    rough_vec_time = time.time() - start_time
+    results['rough_vectorized'] = {
+        'time': rough_vec_time,
+        'results': rough_vec_results
+    }
+    print(f"   Time: {rough_vec_time:.4f} seconds ({N/rough_vec_time:.1f} cases/sec)")
+
+    # Test 6: Rough Torch Vectorized (if available)
+    rough_torch_time = None
+    if TORCH_ROUGH_AVAILABLE:
+        label_rough_torch = ("5." if skip_sampling else "6.")
+        print(f"{label_rough_torch} Testing rough torch vectorized method...")
+        start_time = time.time()
+        rough_torch_judge = TorchRoughVectorizedOcclusionJudge()
+        rough_torch_res = rough_torch_judge.judge_batch(V_batch, C_batch, r_batch, S_batch, R_batch)
+        # torch tensors
+        rough_torch_results = rough_torch_res.occluded.detach().cpu().numpy().tolist()
+        rough_torch_time = time.time() - start_time
+        results['rough_torch_vectorized'] = {
+            'time': rough_torch_time,
+            'results': rough_torch_results
+        }
+        print(f"   Time: {rough_torch_time:.4f} seconds ({N/rough_torch_time:.1f} cases/sec)")
     
     # Performance Analysis
     print(f"\n=== Performance Summary ===")
     print(f"Test cases: {N}")
     if not skip_sampling:
-        print(f"Sampling method:   {sampling_time:.4f}s  ({N/sampling_time:6.1f} cases/sec)")
-    print(f"Original method:   {original_time:.4f}s  ({N/original_time:6.1f} cases/sec)")
-    print(f"Vectorized method: {vectorized_time:.4f}s  ({N/vectorized_time:6.1f} cases/sec)")
+        print(f"Sampling method:       {sampling_time:.4f}s  ({N/sampling_time:6.1f} cases/sec)")
+    print(f"Original method:       {original_time:.4f}s  ({N/original_time:6.1f} cases/sec)")
+    print(f"Vectorized (NumPy):    {vectorized_time:.4f}s  ({N/vectorized_time:6.1f} cases/sec)")
+    print(f"Rough (single):        {rough_single_time:.4f}s  ({N/rough_single_time:6.1f} cases/sec)")
+    print(f"Rough (vectorized):    {rough_vec_time:.4f}s  ({N/rough_vec_time:6.1f} cases/sec)")
+    if rough_torch_time is not None:
+        print(f"Rough (torch vec):     {rough_torch_time:.4f}s  ({N/rough_torch_time:6.1f} cases/sec)")
 
     print(f"\nSpeedup factors:")
     if not skip_sampling:
-        print(f"Vectorized vs Sampling:  {sampling_time/vectorized_time:6.1f}x faster")
-        print(f"Vectorized vs Original:  {original_time/vectorized_time:6.1f}x faster")
-        print(f"Original vs Sampling:    {sampling_time/original_time:6.1f}x faster")
-    else:
-        print(f"Vectorized vs Original:  {original_time/vectorized_time:6.1f}x faster")
+        print(f"Vectorized vs Sampling:        {sampling_time/vectorized_time:6.1f}x")
+        print(f"Original  vs Sampling:         {sampling_time/original_time:6.1f}x")
+    print(f"Vectorized vs Original:        {original_time/vectorized_time:6.1f}x")
+    print(f"Rough(single) vs Original:     {original_time/rough_single_time:6.1f}x")
+    print(f"Rough(vectorized) vs Original: {original_time/rough_vec_time:6.1f}x")
+    print(f"Rough(vectorized) vs Vectorized:{vectorized_time/rough_vec_time:6.1f}x")
+    if rough_torch_time is not None:
+        print(f"Rough(torch vec) vs Original: {original_time/rough_torch_time:6.1f}x")
+        print(f"Rough(torch vec) vs Vectorized:{vectorized_time/rough_torch_time:6.1f}x")
+        print(f"Rough(torch vec) vs Rough(vec):{rough_vec_time/rough_torch_time:6.1f}x")
     
     # Accuracy Analysis
     print(f"\n=== Accuracy Analysis ===")
@@ -172,10 +240,20 @@ def test_performance_comparison(skip_sampling: bool = False):
     if not skip_sampling:
         sampling_correct = sum(1 for i in range(N) if sampling_results[i] == original_results[i])
         sampling_accuracy = sampling_correct / N
-        print(f"Sampling vs Original accuracy: {sampling_correct}/{N} ({sampling_accuracy:.1%})")
+        print(f"Sampling vs Original accuracy:        {sampling_correct}/{N} ({sampling_accuracy:.1%})")
     vec_correct = sum(1 for i in range(N) if vectorized_results[i] == original_results[i])
     vec_accuracy = vec_correct / N
-    print(f"Vectorized vs Original accuracy: {vec_correct}/{N} ({vec_accuracy:.1%})")
+    print(f"Vectorized(NumPy) vs Original:        {vec_correct}/{N} ({vec_accuracy:.1%})")
+    rough_single_correct = sum(1 for i in range(N) if rough_single_results[i] == original_results[i])
+    rough_single_accuracy = rough_single_correct / N
+    print(f"Rough(single) vs Original:           {rough_single_correct}/{N} ({rough_single_accuracy:.1%})")
+    rough_vec_correct = sum(1 for i in range(N) if rough_vec_results[i] == original_results[i])
+    rough_vec_accuracy = rough_vec_correct / N
+    print(f"Rough(vectorized) vs Original:       {rough_vec_correct}/{N} ({rough_vec_accuracy:.1%})")
+    if 'rough_torch_vectorized' in results:
+        rough_torch_correct = sum(1 for i in range(N) if results['rough_torch_vectorized']['results'][i] == original_results[i])
+        rough_torch_accuracy = rough_torch_correct / N
+        print(f"Rough(torch vectorized) vs Original: {rough_torch_correct}/{N} ({rough_torch_accuracy:.1%})")
 
     # Occlusion statistics
     original_occluded = sum(original_results)
@@ -183,9 +261,16 @@ def test_performance_comparison(skip_sampling: bool = False):
     print(f"\nOcclusion counts:")
     if not skip_sampling:
         sampling_occluded = sum(sampling_results)
-        print(f"Sampling method:   {sampling_occluded:3d}/{N} ({sampling_occluded/N:.1%})")
-    print(f"Original method:   {original_occluded:3d}/{N} ({original_occluded/N:.1%})")
-    print(f"Vectorized method: {vec_occluded:3d}/{N} ({vec_occluded/N:.1%})")
+        print(f"Sampling method:       {sampling_occluded:3d}/{N} ({sampling_occluded/N:.1%})")
+    print(f"Original method:       {original_occluded:3d}/{N} ({original_occluded/N:.1%})")
+    print(f"Vectorized (NumPy):    {vec_occluded:3d}/{N} ({vec_occluded/N:.1%})")
+    rough_single_occluded = sum(rough_single_results)
+    rough_vec_occluded = sum(rough_vec_results)
+    print(f"Rough (single):        {rough_single_occluded:3d}/{N} ({rough_single_occluded/N:.1%})")
+    print(f"Rough (vectorized):    {rough_vec_occluded:3d}/{N} ({rough_vec_occluded/N:.1%})")
+    if 'rough_torch_vectorized' in results:
+        rough_torch_occluded = sum(results['rough_torch_vectorized']['results'])
+        print(f"Rough (torch vec):     {rough_torch_occluded:3d}/{N} ({rough_torch_occluded/N:.1%})")
     if not skip_sampling and sampling_accuracy < 1.0:
         print(f"\nSample disagreements (Sampling vs Original):")
         disagreement_count = 0
@@ -205,10 +290,9 @@ if __name__ == "__main__":
     print(f"\n🎉 Performance test completed!")
     print(f"\nKey findings:")
     if not arg_skip:
-        print(f"• Vectorized method is the fastest and most accurate")
-        print(f"• Original method is exact but slower for batch processing")
-        print(f"• Sampling method is approximate and slowest")
+        print("• Vectorized 精确法 通常最快 (除非 rough vectorized 更快)")
+        print("• Rough 系列给出保守判定: 不会产生误报 (False Positive) 但可能漏报")
+        print("• Sampling 最慢且仅近似, 可省略")
     else:
-        print(f"• 跳过 Sampling: 仅比较 Original 与 Vectorized")
-        print(f"• Vectorized 通常显著快于 Original")
-    print(f"• Vectorized approach enables processing large batches efficiently")
+        print("• 跳过 Sampling: 关注精确 / 向量化 / 近似")
+    print("• Rough(vectorized) 适合需要极高速、容忍一定漏检的场景")

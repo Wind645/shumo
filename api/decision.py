@@ -105,8 +105,14 @@ def simulate_with_decision(
     missiles = _build_missiles(which)
     T_max = _max_flight_time(missiles)
     first_missile: Missile = list(missiles.values())[0]
-    # C_BASE_DEFAULT is a torch.Tensor; use clone() not copy()
-    cyl = Cylinder(C_base=C_BASE_DEFAULT.clone(), r=R_CYL_DEFAULT, h=H_CYL_DEFAULT)
+    # 兼容: C_BASE_DEFAULT 可能是 torch.Tensor 或 numpy.ndarray
+    if hasattr(C_BASE_DEFAULT, 'clone'):
+        _c_base = C_BASE_DEFAULT.clone()
+    elif hasattr(C_BASE_DEFAULT, 'copy'):
+        _c_base = C_BASE_DEFAULT.copy()
+    else:
+        _c_base = C_BASE_DEFAULT
+    cyl = Cylinder(C_base=_c_base, r=R_CYL_DEFAULT, h=H_CYL_DEFAULT)
     sim = Simulator(
         missile=first_missile,
         drones=drones,

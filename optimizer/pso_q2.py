@@ -7,7 +7,7 @@ Objective: minimize objective_q2_vector(x) which equals -occluded_time.
 Constants and bounds are kept simple and adjustable.
 """
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple, List
 import math
 import random
 import numpy as np
@@ -157,6 +157,9 @@ def solve_q2_pso(
     bounds: Tuple[Tuple[float, float], ...] = BOUNDS_DEFAULT,
     verbose: bool = False,
     use_vectorized: bool = True,
+    # ---- 泛化支持 ----
+    problem: int = 2,
+    bombs_count: int = 2,
 ) -> PSOResult:
     """PSO for Q2 with optional numpy-parallel batch evaluation via vectorized_judge.
 
@@ -168,10 +171,26 @@ def solve_q2_pso(
         random.seed(seed)
         np.random.seed(seed)
 
-    dim = 4
-    assert len(bounds) == dim
-    lo = np.array([b[0] for b in bounds], dtype=np.float64)
-    hi = np.array([b[1] for b in bounds], dtype=np.float64)
+    if problem == 2:
+        dim = 4
+        assert len(bounds) == dim
+        lo = np.array([b[0] for b in bounds], dtype=np.float64)
+        hi = np.array([b[1] for b in bounds], dtype=np.float64)
+    else:
+        dim = 2 + 2 * bombs_count
+        if bounds is BOUNDS_DEFAULT or len(bounds) == 4:
+            b_list: List[Tuple[float, float]] = [
+                (70.0, 140.0),
+                (-math.pi, math.pi),
+            ]
+            for _ in range(bombs_count):
+                b_list.append((0.0, 60.0))
+                b_list.append((0.2, 12.0))
+            lo = np.array([b[0] for b in b_list], dtype=np.float64)
+            hi = np.array([b[1] for b in b_list], dtype=np.float64)
+        else:
+            lo = np.array([b[0] for b in bounds], dtype=np.float64)
+            hi = np.array([b[1] for b in bounds], dtype=np.float64)
     span = hi - lo
     vmax = vmax_frac * span
 
@@ -179,15 +198,54 @@ def solve_q2_pso(
     X = lo + np.random.rand(pop, dim).astype(np.float64) * span
     V = (np.random.rand(pop, dim).astype(np.float64) - 0.5) * 2.0 * vmax
 
+    def _decode_eval(vec: np.ndarray) -> float:
+        if problem == 2:
+            return float(objective_q2_vector(vec, method=method, dt=dt))
+        speed = float(vec[0]); az = float(vec[1])
+        bombs = []
+        for i in range(bombs_count):
+            t = float(vec[2 + 2 * i]); d = float(vec[2 + 2 * i + 1])
+            bombs.append((t, d))
+        try:
+            if problem == 3:
+                from api.problems import evaluate_problem3
+                res = evaluate_problem3(bombs=bombs, speed=speed, azimuth=az, dt=dt, occlusion_method=method)
+            elif problem == 4:
+                from api.problems import evaluate_problem4
+                drones_spec = [{
+                    'pos0': [17800.0, 0.0, 1800.0],
+                    'speed': speed,
+                    'azimuth': az,
+                    'bombs': [{'deploy_time': t, 'explode_delay': d} for (t, d) in bombs],
+                }]
+                res = evaluate_problem4(drones_spec=drones_spec, dt=dt, occlusion_method=method)
+            elif problem == 5:
+                from api.problems import evaluate_problem5
+                drones_spec = [{
+                    'pos0': [17800.0, 0.0, 1800.0],
+                    'speed': speed,
+                    'azimuth': az,
+                    'bombs': [{'deploy_time': t, 'explode_delay': d} for (t, d) in bombs],
+                }]
+                res = evaluate_problem5(drones_spec=drones_spec, dt=dt, occlusion_method=method)
+            else:
+                return 0.0
+        except Exception:
+            return 0.0
+        oc = res.get('occluded_time', {})
+        if isinstance(oc, dict):
+            v = oc.get('M1', res.get('total', 0.0))
+        else:
+            v = res.get('total', 0.0)
+        return -float(v)
+
     def eval_obj_single(x: Iterable[float]) -> float:
-        return float(objective_q2_vector(x, method=method, dt=dt))
+        return _decode_eval(np.asarray(list(x), dtype=np.float64))
 
     def eval_batch(Xb: np.ndarray) -> np.ndarray:
-        if use_vectorized and method == "judge_caps":
+        if problem == 2 and use_vectorized and method == "judge_caps" and Xb.shape[1] == 4:
             occluded_time = _batch_occluded_time(Xb, dt=dt)
-            # Objective is -occluded_time['M1'] (maximize occlusion => minimize negative)
             return -occluded_time.astype(np.float64)
-        # Fallback: loop slow path
         vals = [eval_obj_single(Xb[i]) for i in range(Xb.shape[0])]
         return np.array(vals, dtype=np.float64)
 
@@ -229,14 +287,44 @@ def solve_q2_pso(
             print(f"iter {it+1}/{iters} gbest={gbest:.6f}")
 
     # Final authoritative evaluation via full simulator (objective value already minimized form)
-    best_eval = evaluate_problem2(
-        speed=float(g[0]),
-        azimuth=float(g[1]),
-        release_time=float(g[2]),
-        explode_delay=float(g[3]),
-        occlusion_method=method,
-        dt=dt,
-    )
+    if problem == 2:
+        best_eval = evaluate_problem2(
+            speed=float(g[0]),
+            azimuth=float(g[1]),
+            release_time=float(g[2]),
+            explode_delay=float(g[3]),
+            occlusion_method=method,
+            dt=dt,
+        )
+    else:
+        speed = float(g[0]); az = float(g[1])
+        bombs = []
+        for i in range(bombs_count):
+            t = float(g[2 + 2 * i]); d = float(g[2 + 2 * i + 1])
+            bombs.append((t, d))
+        if problem == 3:
+            from api.problems import evaluate_problem3
+            best_eval = evaluate_problem3(bombs=bombs, speed=speed, azimuth=az, dt=dt, occlusion_method=method)
+        elif problem == 4:
+            from api.problems import evaluate_problem4
+            drones_spec = [{
+                'pos0': [17800.0, 0.0, 1800.0],
+                'speed': speed,
+                'azimuth': az,
+                'bombs': [{'deploy_time': t, 'explode_delay': d} for (t, d) in bombs],
+            }]
+            best_eval = evaluate_problem4(drones_spec=drones_spec, dt=dt, occlusion_method=method)
+        elif problem == 5:
+            from api.problems import evaluate_problem5
+            drones_spec = [{
+                'pos0': [17800.0, 0.0, 1800.0],
+                'speed': speed,
+                'azimuth': az,
+                'bombs': [{'deploy_time': t, 'explode_delay': d} for (t, d) in bombs],
+            }]
+            best_eval = evaluate_problem5(drones_spec=drones_spec, dt=dt, occlusion_method=method)
+        else:
+            best_eval = {'occluded_time': {'M1': -float(gbest)}, 'total': -float(gbest)}
     return PSOResult(best_x=g, best_value=gbest, best_eval=best_eval)
 
 

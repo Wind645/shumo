@@ -29,7 +29,7 @@ RESUME = True             # 若存在断点文件是否读取 best_x 继续（�
 USE_GA = False            # 是否在 SA 后跑 GA 微调
 GA_GENERATIONS = 200      # GA 迭代次数 (仅当 USE_GA=True)
 
-USE_LOCAL_PSO = False     # 是否启用局部 PSO 细化
+USE_LOCAL_PSO = True     # 是否启用局部 PSO 细化
 LOCAL_PSO_POP = 64        # 局部 PSO 粒子数量
 LOCAL_PSO_ITERS = 15      # 局部 PSO 迭代次数 (注意过大会显著变慢)
 LOCAL_PSO_TOPK = 16       # 从当前 SA batch 中选取前 K 个作为种子

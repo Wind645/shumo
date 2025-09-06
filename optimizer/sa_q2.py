@@ -29,7 +29,7 @@ Bounds (mirroring `pso_q2`):
 Returned best_eval is produced via canonical simulator for consistency.
 """
 from dataclasses import dataclass
-from typing import Optional, Tuple, Iterable, Dict
+from typing import Optional, Tuple, Iterable, Dict, List
 import math
 import random
 import torch
@@ -153,6 +153,9 @@ def solve_q2_sa(
     use_vectorized: bool = True,
     verbose: bool = False,
     restart_every: Optional[int] = 3000,
+    # ---- 泛化支持 ----
+    problem: int = 2,
+    bombs_count: int = 2,
 ) -> SAResult:
     """Simulated annealing with batched neighbor evaluation.
 
@@ -162,19 +165,76 @@ def solve_q2_sa(
     if seed is not None:
         random.seed(seed)
         torch.manual_seed(seed)
-    dim = 4
-    assert len(bounds) == dim
-    lo = torch.tensor([b[0] for b in bounds], dtype=torch.float64, device=dev)
-    hi = torch.tensor([b[1] for b in bounds], dtype=torch.float64, device=dev)
+    if problem == 2:
+        dim = 4
+        assert len(bounds) == dim
+        lo = torch.tensor([b[0] for b in bounds], dtype=torch.float64, device=dev)
+        hi = torch.tensor([b[1] for b in bounds], dtype=torch.float64, device=dev)
+    else:
+        dim = 2 + 2 * bombs_count
+        if bounds is BOUNDS_DEFAULT or len(bounds) == 4:
+            b_list: List[Tuple[float, float]] = [
+                (70.0, 140.0),
+                (-math.pi, math.pi),
+            ]
+            for _ in range(bombs_count):
+                b_list.append((0.0, 60.0))
+                b_list.append((0.2, 12.0))
+            lo = torch.tensor([b[0] for b in b_list], dtype=torch.float64, device=dev)
+            hi = torch.tensor([b[1] for b in b_list], dtype=torch.float64, device=dev)
+        else:
+            lo = torch.tensor([b[0] for b in bounds], dtype=torch.float64, device=dev)
+            hi = torch.tensor([b[1] for b in bounds], dtype=torch.float64, device=dev)
     span = hi - lo
     # initial solution uniformly random
     cur_x = lo + torch.rand(dim, device=dev, dtype=torch.float64) * span
 
+    def _decode_eval(vec: torch.Tensor) -> float:
+        if problem == 2:
+            return float(objective_q2_vector(vec.tolist(), method=method, dt=dt))
+        speed = float(vec[0]); az = float(vec[1])
+        bombs = []
+        for i in range(bombs_count):
+            t = float(vec[2 + 2 * i]); d = float(vec[2 + 2 * i + 1])
+            bombs.append((t, d))
+        try:
+            if problem == 3:
+                from api.problems import evaluate_problem3
+                res = evaluate_problem3(bombs=bombs, speed=speed, azimuth=az, dt=dt, occlusion_method=method)
+            elif problem == 4:
+                from api.problems import evaluate_problem4
+                drones_spec = [{
+                    'pos0': [17800.0, 0.0, 1800.0],
+                    'speed': speed,
+                    'azimuth': az,
+                    'bombs': [{'deploy_time': t, 'explode_delay': d} for (t, d) in bombs],
+                }]
+                res = evaluate_problem4(drones_spec=drones_spec, dt=dt, occlusion_method=method)
+            elif problem == 5:
+                from api.problems import evaluate_problem5
+                drones_spec = [{
+                    'pos0': [17800.0, 0.0, 1800.0],
+                    'speed': speed,
+                    'azimuth': az,
+                    'bombs': [{'deploy_time': t, 'explode_delay': d} for (t, d) in bombs],
+                }]
+                res = evaluate_problem5(drones_spec=drones_spec, dt=dt, occlusion_method=method)
+            else:
+                return 0.0
+        except Exception:
+            return 0.0
+        oc = res.get('occluded_time', {})
+        if isinstance(oc, dict):
+            v = oc.get('M1', res.get('total', 0.0))
+        else:
+            v = res.get('total', 0.0)
+        return -float(v)
+
     def eval_single(x: Iterable[float]) -> float:
-        return float(objective_q2_vector(x, method=method, dt=dt))
+        return _decode_eval(torch.tensor(list(x), dtype=torch.float64, device=dev))
 
     def eval_batch(Xb: torch.Tensor) -> torch.Tensor:
-        if use_vectorized and method == "judge_caps":
+        if problem == 2 and use_vectorized and method == "judge_caps" and Xb.shape[1] == 4:
             occluded_time = _batch_occluded_time(Xb, dt=dt, device=dev)
             return -occluded_time.to(dtype=torch.float64)
         vals = [eval_single(Xb[i]) for i in range(Xb.shape[0])]
@@ -240,14 +300,44 @@ def solve_q2_sa(
             acc_rate = accept_count / (k + 1)
             print(f"iter {k+1}/{iters} T={T:.4f} cur={float(cur_val):.6f} best={best_val:.6f} acc_rate={acc_rate:.3f}")
 
-    best_eval = evaluate_problem2(
-        speed=float(best_x[0].cpu()),
-        azimuth=float(best_x[1].cpu()),
-        release_time=float(best_x[2].cpu()),
-        explode_delay=float(best_x[3].cpu()),
-        occlusion_method=method,
-        dt=dt,
-    )
+    if problem == 2:
+        best_eval = evaluate_problem2(
+            speed=float(best_x[0].cpu()),
+            azimuth=float(best_x[1].cpu()),
+            release_time=float(best_x[2].cpu()),
+            explode_delay=float(best_x[3].cpu()),
+            occlusion_method=method,
+            dt=dt,
+        )
+    else:
+        speed = float(best_x[0].cpu()); az = float(best_x[1].cpu())
+        bombs = []
+        for i in range(bombs_count):
+            t = float(best_x[2 + 2 * i].cpu()); d = float(best_x[2 + 2 * i + 1].cpu())
+            bombs.append((t, d))
+        if problem == 3:
+            from api.problems import evaluate_problem3
+            best_eval = evaluate_problem3(bombs=bombs, speed=speed, azimuth=az, dt=dt, occlusion_method=method)
+        elif problem == 4:
+            from api.problems import evaluate_problem4
+            drones_spec = [{
+                'pos0': [17800.0, 0.0, 1800.0],
+                'speed': speed,
+                'azimuth': az,
+                'bombs': [{'deploy_time': t, 'explode_delay': d} for (t, d) in bombs],
+            }]
+            best_eval = evaluate_problem4(drones_spec=drones_spec, dt=dt, occlusion_method=method)
+        elif problem == 5:
+            from api.problems import evaluate_problem5
+            drones_spec = [{
+                'pos0': [17800.0, 0.0, 1800.0],
+                'speed': speed,
+                'azimuth': az,
+                'bombs': [{'deploy_time': t, 'explode_delay': d} for (t, d) in bombs],
+            }]
+            best_eval = evaluate_problem5(drones_spec=drones_spec, dt=dt, occlusion_method=method)
+        else:
+            best_eval = {'occluded_time': {'M1': -float(best_val)}, 'total': -float(best_val)}
     return SAResult(best_x=best_x.cpu(), best_value=best_val, best_eval=best_eval)
 
 

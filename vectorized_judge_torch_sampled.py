@@ -17,17 +17,23 @@ import torch
 """
 
 
-def _sample_cylinder_circles(K: int, radius: float, base_center: torch.Tensor, height: float) -> torch.Tensor:
-    """Return (2K,3) sample points on bottom & top circle edges of a vertical cylinder.
-    Cylinder axis assumed aligned with +Z. Bottom center = base_center.
-    """
+_SAMPLE_CACHE = {}
+
+def _sample_cylinder_circles(K: int, radius: float, base_center: torch.Tensor, height: float, *, dtype=torch.float32) -> torch.Tensor:
+    """Return cached (2K,3) sample points on cylinder circle edges (bottom & top)."""
+    key = (K, radius, height, base_center.device, dtype)
+    if key in _SAMPLE_CACHE:
+        return _SAMPLE_CACHE[key]
     device = base_center.device
-    angles = torch.linspace(0, 2 * torch.pi, K + 1, device=device)[:-1]
+    angles = torch.linspace(0, 2 * torch.pi, K, device=device, dtype=dtype)
     c, s = torch.cos(angles), torch.sin(angles)
     circle_edge = torch.stack([c, s, torch.zeros_like(c)], 1) * radius  # (K,3)
+    base_center = base_center.to(device=device, dtype=dtype)
     bottom = base_center.unsqueeze(0) + circle_edge
-    top = bottom + torch.tensor([0.0, 0.0, height], device=device)
-    return torch.cat([bottom, top], 0)  # (2K,3)
+    top = bottom.clone(); top[:, 2] += height
+    samples = torch.cat([bottom, top], 0).contiguous()
+    _SAMPLE_CACHE[key] = samples
+    return samples
 
 
 def _segment_sphere_cover(view_pts: torch.Tensor, sample_pts: torch.Tensor, sphere_centers: torch.Tensor, sphere_radius: float) -> torch.Tensor:
@@ -53,7 +59,12 @@ def _segment_sphere_cover(view_pts: torch.Tensor, sample_pts: torch.Tensor, sphe
 
 
 def batch_occluded_time_caps_torch_sampled(
-    params: torch.Tensor, *, dt: float, device: torch.device, K: int = 24
+    params: torch.Tensor,
+    *, dt: float, device: torch.device,
+    K: int = 24,
+    chunk_pairs: int = 8192,
+    use_mask_expand: bool = True,
+    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Compute approximate total occluded time for each parameter row.
 
@@ -64,29 +75,29 @@ def batch_occluded_time_caps_torch_sampled(
     if params.numel() == 0:
         return torch.zeros(0, device=device, dtype=torch.float64)
 
-    p = params.to(device=device, dtype=torch.float64)
+    p = params.to(device=device, dtype=dtype)
     speed, azimuth, t_rel, delay = p[:, 0], p[:, 1], p[:, 2], p[:, 3]
     valid = (speed >= 70) & (speed <= 140) & (t_rel >= 0) & (delay > 0)
-    out = torch.zeros(p.size(0), device=device, dtype=torch.float64)
+    out = torch.zeros(p.size(0), device=device, dtype=dtype)
     if not valid.any():
         return out
 
     # --- Missile straight-line flight (保持与原逻辑一致) ---
-    MISSILE_POS0 = torch.tensor([20000.0, 0.0, 2000.0], device=device)
-    MISSILE_TARGET = torch.zeros(3, device=device)
+    MISSILE_POS0 = torch.tensor([20000.0, 0.0, 2000.0], device=device, dtype=dtype)
+    MISSILE_TARGET = torch.zeros(3, device=device, dtype=dtype)
     MISSILE_SPEED = 300.0
     to_target = MISSILE_TARGET - MISSILE_POS0
     dist = torch.linalg.norm(to_target)
     direction = to_target / dist
     T_final = dist / MISSILE_SPEED
     n_steps = int(T_final / dt) + 1
-    t_grid = torch.linspace(0.0, T_final, n_steps, device=device)
+    t_grid = torch.linspace(0.0, T_final, n_steps, device=device, dtype=dtype)
     missile_pos = MISSILE_POS0 + MISSILE_SPEED * t_grid.unsqueeze(1) * direction  # (n_steps,3)
 
     # --- Drone / smoke initial state ---
-    drone_start = torch.tensor([17800.0, 0.0, 1800.0], device=device).expand_as(p[:, :3])
+    drone_start = torch.tensor([17800.0, 0.0, 1800.0], device=device, dtype=dtype).expand_as(p[:, :3])
     dir_drone = torch.stack([torch.cos(azimuth), torch.sin(azimuth), torch.zeros_like(azimuth)], 1)
-    gravity = torch.tensor([0.0, 0.0, -9.8], device=device)
+    gravity = torch.tensor([0.0, 0.0, -9.8], device=device, dtype=dtype)
     rel_origin = drone_start + dir_drone * speed.unsqueeze(1) * t_rel.unsqueeze(1)
     vel = dir_drone * speed.unsqueeze(1)
     c0 = rel_origin + vel * delay.unsqueeze(1) + 0.5 * gravity * (delay.unsqueeze(1) ** 2)
@@ -100,28 +111,52 @@ def batch_occluded_time_caps_torch_sampled(
     CYL_HEIGHT = 10.0
     CYL_BASE = torch.tensor([0.0, 200.0, 0.0], device=device)
     # Precompute 2K sampling points on cylinder top & bottom circles
-    sample_points = _sample_cylinder_circles(K, CYL_RADIUS, CYL_BASE, CYL_HEIGHT)  # (2K,3)
+    sample_points = _sample_cylinder_circles(K, CYL_RADIUS, CYL_BASE.to(device=device, dtype=dtype), CYL_HEIGHT, dtype=dtype)  # (2K,3)
 
     # 活动时间区间索引 (离散步)
     start_idx = torch.clamp((explode_t / dt).ceil().long(), 0, n_steps - 1)
     end_idx = torch.clamp(((explode_t + SMOKE_LIFE) / dt).floor().long(), 0, n_steps - 1)
-    global_start = start_idx[valid].min().item()
-    global_end = end_idx[valid].max().item()
+    # ---- 向量化时间维: 展开所有 (candidate, time_step) 活动对 ----
+    if use_mask_expand:
+        # 掩码方式生成 (candidate, time) 对，避免 Python 循环
+        t_idx = torch.arange(n_steps, device=device)
+        # (N,T) mask
+        mask = (t_idx.unsqueeze(0) >= start_idx.unsqueeze(1)) & (t_idx.unsqueeze(0) <= end_idx.unsqueeze(1)) & valid.unsqueeze(1)
+        cand_ids, time_ids = mask.nonzero(as_tuple=True)
+    else:
+        valid_idx = valid.nonzero().squeeze(1)
+        if valid_idx.numel()==0:
+            return out
+        lengths = (end_idx - start_idx + 1)
+        lengths_valid = lengths[valid_idx]
+        pos_mask = lengths_valid > 0
+        if not pos_mask.all():
+            valid_idx = valid_idx[pos_mask]
+            lengths_valid = lengths_valid[pos_mask]
+        cand_ids = torch.repeat_interleave(valid_idx, lengths_valid)
+        time_index_list = [
+            torch.arange(start_idx[i], end_idx[i] + 1, device=device)
+            for i in valid_idx.tolist()
+        ]
+        time_ids = torch.cat(time_index_list)
+    # 计算每个 pair 的观察点 / 烟雾中心 等
+    V_all = missile_pos[time_ids]
+    t_now_all = t_grid[time_ids]
+    tau_all = torch.clamp(t_now_all - explode_t[cand_ids], min=0.0)
+    smoke_center_all = c0[cand_ids].clone()
+    smoke_center_all[:, 2] -= SMOKE_DESCENT * tau_all
+    B = V_all.size(0)
+    R_smoke = SMOKE_RADIUS
+    # 分块以控制显存 (chunk_pairs)
+    for s in range(0, B, chunk_pairs):
+        e = min(s + chunk_pairs, B)
+        V_chunk = V_all[s:e]
+        S_chunk = smoke_center_all[s:e]
+        covered = _segment_sphere_cover(V_chunk, sample_points, S_chunk, R_smoke)
+        if covered.any():
+            out.index_add_(0, cand_ids[s:e][covered], torch.full((int(covered.sum()),), dt, device=device, dtype=out.dtype))
 
-    for ti in range(global_start, global_end + 1):
-        active = valid & (ti >= start_idx) & (ti <= end_idx)
-        if not active.any():
-            continue
-        ids = active.nonzero().squeeze(1)
-        V_t = missile_pos[ti].expand(ids.numel(), 3)
-        t_now = t_grid[ti]
-        tau = torch.clamp(t_now - explode_t[ids], min=0.0)
-        smoke_center = c0[ids].clone()
-        smoke_center[:, 2] -= SMOKE_DESCENT * tau  # 下降
-        covered = _segment_sphere_cover(V_t, sample_points, smoke_center, SMOKE_RADIUS)
-        out[ids[covered]] += dt
-
-    return out
+    return out.to(dtype=torch.float32)
 
 
 __all__ = ["batch_occluded_time_caps_torch_sampled"]

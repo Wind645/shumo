@@ -30,7 +30,7 @@ Bounds (same as PSO/SA):
 Returned best_eval is produced via canonical simulator for consistency.
 """
 from dataclasses import dataclass
-from typing import Optional, Tuple, Iterable, Dict, Callable
+from typing import Optional, Tuple, Iterable, Dict, Callable, List
 import math
 import random
 import numpy as np
@@ -403,6 +403,9 @@ def solve_q2_ga(
     use_fast_caps: bool = True,
     judge_backend: Optional[str] = None,
     device: Optional[str] = None,
+    # ---- 泛化支持 ----
+    problem: int = 2,              # 题号: 2/3/4/5 （当前仅 2 完整向量化; 3/4/5 退化为标量评估）
+    bombs_count: int = 2,           # problem>=3 时假设炸弹数量（简单固定长度编码）
 ) -> GAResult:
     """Genetic Algorithm for Q2 with vectorized batch evaluation.
 
@@ -426,14 +429,75 @@ def solve_q2_ga(
         np.random.seed(seed)
         random.seed(seed)
 
-    dim = 4
-    assert len(bounds) == dim
-    bounds_array = np.array(bounds, dtype=np.float64)
+    # --- 构造参数维度与 bounds ---
+    if problem == 2:
+        dim = 4
+        assert len(bounds) == dim
+        bounds_array = np.array(bounds, dtype=np.float64)
+    else:
+        # 通用编码: [speed, azimuth, t1, d1, t2, d2, ...]
+        dim = 2 + 2 * bombs_count
+        # 若未提供自定义 bounds, 构造默认
+        if bounds is BOUNDS_DEFAULT or len(bounds) == 4:
+            b_list: List[Tuple[float, float]] = [
+                (70.0, 140.0),        # speed
+                (-math.pi, math.pi),  # azimuth
+            ]
+            for _ in range(bombs_count):
+                b_list.append((0.0, 60.0))   # deploy_time
+                b_list.append((0.2, 12.0))   # explode_delay
+            bounds_array = np.array(b_list, dtype=np.float64)
+        else:  # 用户自定义传入
+            bounds_array = np.array(bounds, dtype=np.float64)
     lo = bounds_array[:, 0]
     hi = bounds_array[:, 1]
     
+    def _decode_and_eval_general(vec: np.ndarray) -> float:
+        """非 Q2 通用评估 (标量调用, 维度较小开销可接受)。目标: -occluded_time(M1)."""
+        if problem == 2:
+            return float(objective_q2_vector(vec, method=method, dt=dt))
+        # problem 3/4/5 统一用 evaluate_problemX
+        speed = float(vec[0]); az = float(vec[1])
+        bombs = []
+        for i in range(bombs_count):
+            t = float(vec[2 + 2 * i])
+            d = float(vec[2 + 2 * i + 1])
+            bombs.append((t, d))
+        try:
+            if problem == 3:
+                from api.problems import evaluate_problem3
+                res = evaluate_problem3(bombs=bombs, speed=speed, azimuth=az, dt=dt, occlusion_method=method)
+            elif problem == 4:
+                from api.problems import evaluate_problem4
+                drones_spec = [{
+                    'pos0': [17800.0, 0.0, 1800.0],
+                    'speed': speed,
+                    'azimuth': az,
+                    'bombs': [{'deploy_time': t, 'explode_delay': d} for (t, d) in bombs],
+                }]
+                res = evaluate_problem4(drones_spec=drones_spec, dt=dt, occlusion_method=method)
+            elif problem == 5:
+                from api.problems import evaluate_problem5
+                drones_spec = [{
+                    'pos0': [17800.0, 0.0, 1800.0],
+                    'speed': speed,
+                    'azimuth': az,
+                    'bombs': [{'deploy_time': t, 'explode_delay': d} for (t, d) in bombs],
+                }]
+                res = evaluate_problem5(drones_spec=drones_spec, dt=dt, occlusion_method=method)
+            else:
+                raise ValueError(f"Unsupported problem={problem}")
+        except Exception:
+            return 0.0  # 失败返回差值 (0 occlusion)
+        oc = None
+        if 'occluded_time' in res and isinstance(res['occluded_time'], dict):
+            oc = res['occluded_time'].get('M1', res.get('total', 0.0))
+        else:
+            oc = res.get('total', 0.0)
+        return -float(oc)  # objective
+
     def eval_single(x: Iterable[float]) -> float:
-        return float(objective_q2_vector(x, method=method, dt=dt))
+        return _decode_and_eval_general(np.asarray(list(x), dtype=np.float64))
 
     # Device for torch backends (lazy selection only if needed)
     torch_device = None
@@ -442,11 +506,10 @@ def solve_q2_ga(
         torch_device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
 
     def eval_batch(pop: np.ndarray) -> np.ndarray:
-        # Unified backend selection
-        if method == "judge_caps" and (judge_backend is not None or use_vectorized):
+        # 仅 problem 2 且 dim==4 才使用批量向量化后端
+        if problem == 2 and pop.shape[1] == 4 and method == "judge_caps" and (judge_backend is not None or use_vectorized):
             backend = judge_backend
             if backend is None:
-                # Backward compatibility path: replicate old flags
                 backend = 'rough' if use_fast_caps else 'vectorized'
             if backend in ('rough', 'fast', 'fast_caps'):
                 occluded_time = _batch_occluded_time_fast(pop, dt=dt)
@@ -470,7 +533,7 @@ def solve_q2_ga(
             else:
                 raise ValueError(f"未知 GA judge_backend={backend}")
             return -occluded_time.astype(np.float64)
-        # Fallback single evaluation path
+        # 其它题：逐个标量评估
         vals = [eval_single(pop[i]) for i in range(pop.shape[0])]
         return np.array(vals, dtype=np.float64)
 
@@ -541,28 +604,60 @@ def solve_q2_ga(
             _log(f"Generation {gen + 1}: Best fitness = {best_fitness:.6f}")
 
     # Final evaluation with canonical simulator
-    try:
-        best_eval = evaluate_problem2(
-            speed=float(best_x[0]),
-            azimuth=float(best_x[1]),
-            release_time=float(best_x[2]),
-            explode_delay=float(best_x[3]),
-            occlusion_method=method,
-            dt=dt,
-        )
-    except RuntimeError as e:
-        if "device" in str(e):
-            # Fallback for device issues - use sampling method
+    # 最终权威评估
+    if problem == 2:
+        try:
             best_eval = evaluate_problem2(
                 speed=float(best_x[0]),
                 azimuth=float(best_x[1]),
                 release_time=float(best_x[2]),
                 explode_delay=float(best_x[3]),
-                occlusion_method="sampling",
+                occlusion_method=method,
                 dt=dt,
             )
+        except RuntimeError as e:
+            if "device" in str(e):
+                best_eval = evaluate_problem2(
+                    speed=float(best_x[0]),
+                    azimuth=float(best_x[1]),
+                    release_time=float(best_x[2]),
+                    explode_delay=float(best_x[3]),
+                    occlusion_method="sampling",
+                    dt=dt,
+                )
+            else:
+                raise
+    else:
+        # 解码并调用
+        speed = float(best_x[0]); az = float(best_x[1])
+        bombs = []
+        for i in range(bombs_count):
+            t = float(best_x[2 + 2 * i])
+            d = float(best_x[2 + 2 * i + 1])
+            bombs.append((t, d))
+        if problem == 3:
+            from api.problems import evaluate_problem3
+            best_eval = evaluate_problem3(bombs=bombs, speed=speed, azimuth=az, dt=dt, occlusion_method=method)
+        elif problem == 4:
+            from api.problems import evaluate_problem4
+            drones_spec = [{
+                'pos0': [17800.0, 0.0, 1800.0],
+                'speed': speed,
+                'azimuth': az,
+                'bombs': [{'deploy_time': t, 'explode_delay': d} for (t, d) in bombs],
+            }]
+            best_eval = evaluate_problem4(drones_spec=drones_spec, dt=dt, occlusion_method=method)
+        elif problem == 5:
+            from api.problems import evaluate_problem5
+            drones_spec = [{
+                'pos0': [17800.0, 0.0, 1800.0],
+                'speed': speed,
+                'azimuth': az,
+                'bombs': [{'deploy_time': t, 'explode_delay': d} for (t, d) in bombs],
+            }]
+            best_eval = evaluate_problem5(drones_spec=drones_spec, dt=dt, occlusion_method=method)
         else:
-            raise
+            best_eval = {'occluded_time': {'M1': -float(best_fitness)}, 'total': -float(best_fitness)}
     
     return GAResult(best_x=best_x, best_value=best_fitness, best_eval=best_eval)
 

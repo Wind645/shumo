@@ -1,32 +1,75 @@
 from __future__ import annotations
-import argparse, sys
+"""统一优化入口（去除 argparse 版）
+
+把原来命令行参数改成文件顶部常量，题目给定的条件本来就是常量，直接在这里改值即可。
+
+说明：
+1. 若某项设为 None 则使用 router 中的默认值；否则覆盖。
+2. 只需编辑下面这几行常量即可，其他逻辑不动。
+"""
+
 from optimizer import router
 
-def main(argv=None):
-    p = argparse.ArgumentParser(description="Unified optimizer runner (problems 2-5)")
-    p.add_argument('--problem','-p', type=int, default=router.PROBLEM, choices=[2,3,4,5], help='Problem id (2-5)')
-    p.add_argument('--algo','-a', type=str, default=router.ALGO, choices=['sa','ga','pso','hybrid'], help='Algorithm')
-    p.add_argument('--bombs','-b', type=int, default=router.BOMBS_COUNT, help='Bombs per drone (Q3/Q5 only)')
-    p.add_argument('--dt', type=float, default=router.DT, help='Time step')
-    p.add_argument('--method','-m', type=str, default=router.OCCLUSION_METHOD, choices=['sampling','judge_caps','vectorized_sampling'], help='Occlusion method')
-    p.add_argument('--backend', type=str, default=router.BACKEND, help='judge_caps fast backend (rough|vectorized* etc)')
-    p.add_argument('--iters', type=int, default=None, help='Iterations / generations override')
-    p.add_argument('--gens', type=int, default=None, help='GA generations override')
-    p.add_argument('--seed', type=int, default=None)
-    p.add_argument('--verbose','-v', action='store_true')
-    args = p.parse_args(argv)
-    # apply to router module globals
-    router.PROBLEM = args.problem
-    router.ALGO = args.algo
-    router.BOMBS_COUNT = args.bombs
-    router.DT = args.dt
-    router.OCCLUSION_METHOD = args.method
-    router.BACKEND = args.backend
-    router.ITERS = args.iters
-    router.GA_GENERATIONS = args.gens
-    router.SEED = args.seed
-    router.VERBOSE = args.verbose
+# ================== 可编辑常量区域 ==================
+# 问题编号 (2,3,4,5)；设为 None 则保持 router 默认
+PROBLEM_OVERRIDE: int | None = None
+
+# 算法选择: 'sa' | 'ga' | 'pso' | 'hybrid'
+ALGO_OVERRIDE: str | None = None
+
+# 每架无人机投放弹数（题 3 / 5 相关）
+BOMBS_PER_DRONE_OVERRIDE: int | None = None
+
+# 时间步长
+DT_OVERRIDE: float | None = None
+
+# 遮蔽判定方法: 'sampling' | 'judge_caps' | 'vectorized_sampling'
+OCCLUSION_METHOD_OVERRIDE: str | None = None
+
+# backend: rough | vectorized* | 其它实现
+BACKEND_OVERRIDE: str | None = None
+
+# 总迭代次数 (模拟 / SA / PSO 通用)；若为 GA 可用 GA_GENERATIONS_OVERRIDE
+ITERS_OVERRIDE: int | None = None
+
+# GA 代数
+GA_GENERATIONS_OVERRIDE: int | None = None
+
+# 随机种子
+SEED_OVERRIDE: int | None = 42
+
+# 详细输出
+VERBOSE_OVERRIDE: bool | None = True
+# ================== 可编辑常量区域 END ==============
+
+
+def apply_overrides():
+    if PROBLEM_OVERRIDE is not None:
+        router.PROBLEM = PROBLEM_OVERRIDE
+    if ALGO_OVERRIDE is not None:
+        router.ALGO = ALGO_OVERRIDE
+    if BOMBS_PER_DRONE_OVERRIDE is not None:
+        router.BOMBS_COUNT = BOMBS_PER_DRONE_OVERRIDE
+    if DT_OVERRIDE is not None:
+        router.DT = DT_OVERRIDE
+    if OCCLUSION_METHOD_OVERRIDE is not None:
+        router.OCCLUSION_METHOD = OCCLUSION_METHOD_OVERRIDE
+    if BACKEND_OVERRIDE is not None:
+        router.BACKEND = BACKEND_OVERRIDE
+    if ITERS_OVERRIDE is not None:
+        router.ITERS = ITERS_OVERRIDE
+    if GA_GENERATIONS_OVERRIDE is not None:
+        router.GA_GENERATIONS = GA_GENERATIONS_OVERRIDE
+    if SEED_OVERRIDE is not None:
+        router.SEED = SEED_OVERRIDE
+    if VERBOSE_OVERRIDE is not None:
+        router.VERBOSE = VERBOSE_OVERRIDE
+
+
+def main():  # 保持接口
+    apply_overrides()
     router.run()
 
-if __name__ == '__main__':
+
+if __name__ == '__main__':  # 直接运行本文件即可
     main()

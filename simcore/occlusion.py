@@ -4,6 +4,7 @@ import numpy as np
 
 from .baolijiefa import CylinderOcclusionJudge
 from judge import OcclusionJudge
+from rough_judge import RoughOcclusionJudge  # 新增: 近似判定
 from .entities import Cylinder
 
 Vec3 = np.ndarray
@@ -52,6 +53,19 @@ class OcclusionEvaluator:
                 hits.append(k)
         return (len(hits) > 0), hits
 
+    def _judge_cap_by_union_rough(self, V: np.ndarray, spheres: Iterable[Tuple[np.ndarray, float]], C_cap: np.ndarray, r_cap: float):
+        """粗糙近似版本: 使用 RoughOcclusionJudge (只会漏判, 不会误判)。"""
+        Vp = np.array([V[0], V[1], V[2] - C_cap[2]])
+        C_flat = np.array([C_cap[0], C_cap[1], 0.0])
+        hits: List[int] = []
+        for k, (S, R) in enumerate(spheres):
+            Sp = np.array([S[0], S[1], S[2] - C_cap[2]])
+            j = RoughOcclusionJudge(Vp, C_flat, r_cap, Sp, R)
+            res = j.is_fully_occluded()
+            if bool(res.occluded):
+                hits.append(k)
+        return (len(hits) > 0), hits
+
     def _fully_occluded_sampling(self, V: np.ndarray, spheres: Iterable[Tuple[np.ndarray, float]]):
         pts = self._pts
         total = int(pts.shape[0]) if pts is not None else 0
@@ -75,7 +89,20 @@ class OcclusionEvaluator:
         ok = bool(bottom_ok and top_ok)
         return ok, dict(mode="judge_caps", bottom=bool(bottom_ok), top=bool(top_ok), bottom_hits=bottom_hits[:8], top_hits=top_hits[:8])
 
+    def _fully_occluded_rough_caps(self, V: np.ndarray, spheres: Iterable[Tuple[np.ndarray, float]]):
+        spheres = list(spheres)
+        if len(spheres) == 0:
+            return False, dict(mode="rough_caps", bottom=False, top=False, bottom_hits=[], top_hits=[])
+        Cb = self.cyl.C_base
+        Ct = self.cyl.C_base + np.array([0.0, 0.0, self.cyl.h])
+        bottom_ok, bottom_hits = self._judge_cap_by_union_rough(V, spheres, Cb, self.cyl.r)
+        top_ok, top_hits = self._judge_cap_by_union_rough(V, spheres, Ct, self.cyl.r)
+        ok = bool(bottom_ok and top_ok)
+        return ok, dict(mode="rough_caps", bottom=bool(bottom_ok), top=bool(top_ok), bottom_hits=bottom_hits[:8], top_hits=top_hits[:8])
+
     def fully_occluded(self, V: np.ndarray, spheres: Iterable[Tuple[np.ndarray, float]]):
         if self.method == "judge_caps":
             return self._fully_occluded_judge_caps(V, spheres)
+        if self.method == "rough_caps":
+            return self._fully_occluded_rough_caps(V, spheres)
         return self._fully_occluded_sampling(V, spheres)

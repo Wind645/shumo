@@ -3,17 +3,17 @@
 思路: 用包围圆 (位于 z=0 平面, 圆心 C, 半径 r) 的球体 B=(C,r) 代替真实圆的角域。
 再判定此小球 B 在观察点 V 下是否被大球 A=(S,R) 的视锥完全覆盖。
 
-严格条件 (原算法): max_t angle(u_S, X(t)-V) \le alpha_S.
+严格条件 (原算法): max_t angle(u_S, X(t)-V) <= alpha_S.
 近似替换: 令 u_S = (S-V)/||S-V||, u_C = (C-V)/||C-V||.
 小球 B 的角半径 beta = arcsin(r/||C-V||); 大球 A 的角半径 alpha = arcsin(R/||S-V||).
-则充分条件 (也常较紧) : gamma + beta \le alpha, 其中 gamma = angle(u_S, u_C).
+则充分条件 (也常较紧): gamma + beta <= alpha, 其中 gamma = angle(u_S, u_C).
 
 若成立, 原圆一定被完全遮挡; 若不成立, 原圆可能仍被遮挡 (因此该判定可能产生 False Negative, 不会产生 False Positive)。
 为保持与精确 Judge API 一致, 返回字段 f_min, cos_alpha_s 等, 但 f_min 为近似: f_min_approx = cos(gamma + beta)。
 
 提供:
-  - RoughOcclusionJudge: 单例 API, 与 judge.OcclusionJudge 接口兼容 (is_fully_occluded())
-  - RoughVectorizedOcclusionJudge: 批量 API, 与 vectorized_judge.VectorizedOcclusionJudge.judge_batch 兼容
+    - RoughOcclusionJudge: 单例 API, 与 judge.OcclusionJudge 接口兼容 (is_fully_occluded())
+    - RoughVectorizedOcclusionJudge: 批量 API, 与 vectorized_judge.VectorizedOcclusionJudge.judge_batch 兼容
 """
 
 from __future__ import annotations

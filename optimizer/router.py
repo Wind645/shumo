@@ -8,7 +8,7 @@
     - Q4: 3 架无人机各 1 枚: [s1,a1,t1,d1, s2,a2,t2,d2, s3,a3,t3,d3]
     - Q5: 5 架无人机, 每架 bombs_count 枚: per-drone block 依次拼接。
 
-可选择 occlusion_method: 'sampling' | 'judge_caps' | 'vectorized_sampling'
+可选择 occlusion_method: 'sampling' | 'judge_caps' | 'rough_caps' | 'vectorized_sampling'
 （向量化采样仅当前实现 M1 单导弹, 自动在问题 2,3,4,5 单导弹场景使用）。
 """
 from __future__ import annotations
@@ -16,12 +16,12 @@ from __future__ import annotations
 # ==================== 可编辑区 ====================
 PROBLEM = 3                  # 2 / 3 / 4 / 5
 ALGO = 'sa'                  # 'ga' | 'pso' | 'sa'
-BOMBS_COUNT = 2              # problem=3/5 时炸弹数 (编码长度随之变化)
+BOMBS_COUNT = 3              # problem=3/5 时炸弹数 (编码长度随之变化)
 DT = 0.02
-OCCLUSION_METHOD = 'judge_caps'  # 'sampling' | 'judge_caps' | 'vectorized_sampling'
+OCCLUSION_METHOD = 'rough_caps'  # 'sampling' | 'judge_caps' | 'rough_caps' | 'vectorized_sampling'
 BACKEND = 'rough'            # (保留占位, 新统一实现暂不区分 backend)
 SEED = None
-VERBOSE = False
+VERBOSE = True
 
 # 算法迭代/代数 (None 使用下面的默认)
 ITERS = None

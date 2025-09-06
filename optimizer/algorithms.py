@@ -112,16 +112,25 @@ def _batch_occluded_time_q2_judge_caps(params: np.ndarray, *, dt: float) -> np.n
 
 def _scalar_occluded_time(problem: int, x: List[float], bombs_count: int, method: str, dt: float) -> float:
     dec = decode_vector(problem, x, bombs_count)
-    if problem == 2:
-        r = evaluate_problem2(**dec.to_eval_kwargs(), occlusion_method=method, dt=dt)
-    elif problem == 3:
-        r = evaluate_problem3(**dec.to_eval_kwargs(), occlusion_method=method, dt=dt)
-    elif problem == 4:
-        r = evaluate_problem4(**dec.to_eval_kwargs(), occlusion_method=method, dt=dt)
-    elif problem == 5:
-        r = evaluate_problem5(**dec.to_eval_kwargs(), occlusion_method=method, dt=dt)
-    else:
+    # 若炸弹时间间隔非法，直接返回 0 遮蔽时间 (最差) 而不是抛异常中断优化
+    if dec.invalid:
         return 0.0
+    try:
+        if problem == 2:
+            r = evaluate_problem2(**dec.to_eval_kwargs(), occlusion_method=method, dt=dt)
+        elif problem == 3:
+            r = evaluate_problem3(**dec.to_eval_kwargs(), occlusion_method=method, dt=dt)
+        elif problem == 4:
+            r = evaluate_problem4(**dec.to_eval_kwargs(), occlusion_method=method, dt=dt)
+        elif problem == 5:
+            r = evaluate_problem5(**dec.to_eval_kwargs(), occlusion_method=method, dt=dt)
+        else:
+            return 0.0
+    except ValueError as e:
+        msg = str(e)
+        if '投弹间隔不足' in msg or '间隔不足' in msg:
+            return 0.0  # 视为无效方案
+        raise
     if 'total' in r:
         return float(r['total']) if problem>2 else float(r['occluded_time'].get('M1', r['total']))
     return 0.0

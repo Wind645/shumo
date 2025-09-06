@@ -28,7 +28,6 @@
 
 import numpy as np
 import time
-import argparse
 from judge import OcclusionJudge
 from vectorized_judge import VectorizedOcclusionJudge
 from rough_judge import RoughOcclusionJudge, RoughVectorizedOcclusionJudge
@@ -430,45 +429,69 @@ def run_sizes_for_rough(sizes: List[int], repeats: int, warmup: int,
     print("\n注: kc/s=千案例/秒, Mc/s=百万案例/秒 (best run).")
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Occlusion performance / rough benchmarks")
-    parser.add_argument("--no-sampling", action="store_true", help="跳过 sampling (默认即跳过)")
-    parser.add_argument("--only-rough", action="store_true", help="仅测试 rough (含 torch) 版本")
-    parser.add_argument("--cases", type=int, default=None, help="单一规模 N")
-    parser.add_argument("--sizes", type=str, default=None, help="多规模 (逗号分隔, 支持 100k,1m) 仅与 --only-rough 搭配")
-    parser.add_argument("--repeats", type=int, default=1, help="计时重复次数 (>=1)")
-    parser.add_argument("--warmup", type=int, default=1, help="预热次数 (>=0)")
-    parser.add_argument("--skip-rough-single", action="store_true", help="跳过 rough 单例 (large N 时节省时间)")
-    args = parser.parse_args()
+"""去除 argparse 的版本: 直接通过顶部常量配置运行性能比较。
 
-    if args.sizes and not args.only_rough:
-        print("[警告] --sizes 仅在 --only-rough 模式有效; 忽略 --sizes, 走普通模式。")
-        args.sizes = None
+编辑下方 CONFIG_* 常量后直接 `uv run performance_comparison.py` 即可。
+"""
 
-    if args.sizes:
-        sizes = _parse_sizes(args.sizes)
-        run_sizes_for_rough(sizes, repeats=args.repeats, warmup=args.warmup,
-                            skip_rough_single=args.skip_rough_single)
-    else:
-        N = args.cases if args.cases is not None else CASENUM
-        arg_skip = args.no_sampling or SKIP_SAMPLING
-        res = test_performance_comparison(
-            skip_sampling=arg_skip,
-            only_rough=args.only_rough,
-            N=N,
-            repeats=args.repeats,
-            warmup=args.warmup,
-            skip_rough_single=args.skip_rough_single,
+# ================== 可编辑常量区域 ==================
+# 是否仅 Rough 系列测试
+CONFIG_ONLY_ROUGH = False
+
+# 是否跳过 sampling (True 推荐, 采样很慢且只是近似)
+CONFIG_SKIP_SAMPLING_FORCE = True  # 若 True 则无视下面 skip_sampling 逻辑
+
+# 单一规模 (若 CONFIG_SIZES 非空则忽略)
+CONFIG_CASES: int | None = 50000
+
+# 多规模列表字符串 (例如 "20k,200k,1m"), 仅当 CONFIG_ONLY_ROUGH=True 时生效
+CONFIG_SIZES: str | None = None
+
+# 预热与重复次数
+CONFIG_WARMUP = 1
+CONFIG_REPEATS = 1
+
+# 是否跳过 rough 单例版本 (大规模测试提升速度)
+CONFIG_SKIP_ROUGH_SINGLE = False
+# ================== 可编辑常量区域 END ==============
+
+
+def _run_from_constants():
+    if CONFIG_SIZES and not CONFIG_ONLY_ROUGH:
+        print("[警告] 只有在 ONLY_ROUGH 模式才使用多规模; 已忽略 CONFIG_SIZES。")
+    if CONFIG_SIZES and CONFIG_ONLY_ROUGH:
+        sizes = _parse_sizes(CONFIG_SIZES)
+        run_sizes_for_rough(
+            sizes,
+            repeats=CONFIG_REPEATS,
+            warmup=CONFIG_WARMUP,
+            skip_rough_single=CONFIG_SKIP_ROUGH_SINGLE,
         )
-        print(f"\n🎉 Performance test completed!")
-        if args.only_rough:
-            print("• 已在 only-rough 模式下完成; 可用 --sizes 做多规模扫描")
+        return
+
+    N = CONFIG_CASES if CONFIG_CASES is not None else CASENUM
+    arg_skip = CONFIG_SKIP_SAMPLING_FORCE or SKIP_SAMPLING
+    res = test_performance_comparison(
+        skip_sampling=arg_skip,
+        only_rough=CONFIG_ONLY_ROUGH,
+        N=N,
+        repeats=CONFIG_REPEATS,
+        warmup=CONFIG_WARMUP,
+        skip_rough_single=CONFIG_SKIP_ROUGH_SINGLE,
+    )
+    print("\n🎉 Performance test completed!")
+    if CONFIG_ONLY_ROUGH:
+        print("• 已在 only-rough 模式下完成; 可设置 CONFIG_SIZES 做多规模扫描")
+    else:
+        if not arg_skip:
+            print("• Vectorized 精确法 通常最快 (除非 rough vectorized 更快)")
+            print("• Rough 系列给出保守判定: 不会误报, 可能漏报")
+            print("• Sampling 最慢且仅近似")
         else:
-            if not arg_skip:
-                print("• Vectorized 精确法 通常最快 (除非 rough vectorized 更快)")
-                print("• Rough 系列给出保守判定: 不会误报, 可能漏报")
-                print("• Sampling 最慢且仅近似")
-            else:
-                print("• 跳过 Sampling: 聚焦 精确 vs 近似 vs GPU")
-            if TORCH_ROUGH_AVAILABLE:
-                print("• 可以使用 --only-rough --sizes 进行大规模 GPU 拐点测试")
+            print("• 跳过 Sampling: 聚焦 精确 vs 近似 vs GPU")
+        if TORCH_ROUGH_AVAILABLE:
+            print("• 可以配置 ONLY_ROUGH + SIZES 进行大规模 GPU 拐点测试")
+
+
+if __name__ == "__main__":
+    _run_from_constants()

@@ -1,5 +1,8 @@
 from __future__ import annotations
-import argparse
+"""采样法 vs 解析法对比 (去除 argparse 版)
+
+通过顶部常量直接配置，避免命令行解析。
+"""
 import time
 import random
 from typing import Dict, Tuple
@@ -190,40 +193,42 @@ def run_one_trial(
     return same, detail
 
 
-def main():
-    ap = argparse.ArgumentParser(description="更细粒度的采样法 vs 解析法对比")
-    ap.add_argument("--trials", type=int, default=200, help="随机样本次数")
-    ap.add_argument("--seed", type=int, default=None, help="随机种子")
-    ap.add_argument("--n-theta", type=int, default=48, help="周向采样数")
-    ap.add_argument("--n-h", type=int, default=16, help="高度采样数")
-    ap.add_argument("--n-cap-radial", type=int, default=6, help="端面径向环数（含中心）")
-    ap.add_argument("--no-caps", action="store_true", help="禁用端面采样（仅侧面）")
-    ap.add_argument("--refine-on-mismatch", action="store_true", help="不一致时自动加密采样再比一次")
-    ap.add_argument("--verbose", action="store_true", help="全部打印；默认仅打印不一致样本")
-    args = ap.parse_args()
+# ================== 可编辑常量区域 ==================
+CONF_TRIALS = 200
+CONF_SEED: int | None = 123
+CONF_N_THETA = 48
+CONF_N_H = 16
+CONF_N_CAP_RADIAL = 6
+CONF_CHECK_CAPS = True  # True=采样端面; False=只侧面
+CONF_REFINE_ON_MISMATCH = False
+CONF_VERBOSE = False
+# ================== 可编辑常量区域 END ==============
 
-    if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
 
-    check_caps = not args.no_caps
+def run_from_constants():
+    if CONF_SEED is not None:
+        random.seed(CONF_SEED)
+        np.random.seed(CONF_SEED)
 
     ok = 0
     diff = 0
     t_samp = 0.0
     t_ana = 0.0
 
-    for i in range(1, args.trials + 1):
+    for i in range(1, CONF_TRIALS + 1):
         same, info = run_one_trial(
-            n_theta=args.n_theta, n_h=args.n_h, n_cap_radial=args.n_cap_radial, check_caps=check_caps,
-            refine_on_mismatch=args.refine_on_mismatch
+            n_theta=CONF_N_THETA,
+            n_h=CONF_N_H,
+            n_cap_radial=CONF_N_CAP_RADIAL,
+            check_caps=CONF_CHECK_CAPS,
+            refine_on_mismatch=CONF_REFINE_ON_MISMATCH,
         )
         t_samp += info["time_us"]["sampling"]
         t_ana += info["time_us"]["analytic"]
 
         if same:
             ok += 1
-            if args.verbose:
+            if CONF_VERBOSE:
                 print(f"[{i:04d}] {GREEN}一致{RESET}  samp={info['sampling']['ok']}  ana={info['analytic']['ok']}  "
                       f"samp_margin={info['sampling']['min_margin']:.6g}  "
                       f"ana_margin={info['analytic']['margin'] if info['analytic']['margin'] is not None else None}")
@@ -237,14 +242,14 @@ def main():
             print(f"  解析裕量 min(f_min - cosα): {ana['margin'] if ana['margin'] is not None else None}")
             print(f"  底面: ok={ana['bottom']['ok']}  margin={ana['bottom']['margin']}")
             print(f"  顶面: ok={ana['top']['ok']}     margin={ana['top']['margin']}")
-            if args.refine_on_mismatch and ("sampling_refined" in info):
+            if CONF_REFINE_ON_MISMATCH and ("sampling_refined" in info):
                 sr = info["sampling_refined"]
                 print(f"  加密采样后: ok={sr['ok']}  min_margin={sr['min_margin']:.6g}  same_after_refine={info['same_after_refine']}")
 
     print()
-    print(f"汇总：一致 {ok} / {args.trials}，不一致 {diff} / {args.trials}")
-    print(f"平均耗时：采样 {t_samp/args.trials:.1f} μs/例，解析 {t_ana/args.trials:.1f} μs/例")
+    print(f"汇总：一致 {ok} / {CONF_TRIALS}，不一致 {diff} / {CONF_TRIALS}")
+    print(f"平均耗时：采样 {t_samp/CONF_TRIALS:.1f} μs/例，解析 {t_ana/CONF_TRIALS:.1f} μs/例")
 
 
 if __name__ == "__main__":
-    main()
+    run_from_constants()

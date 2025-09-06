@@ -1,0 +1,16 @@
+{
+  "FYs": {
+    "FY1": {
+      "speed": 120.0,
+      "aim_fake_target": true,
+      "bombs": [ { "deploy_time": 1.5, "explode_delay": 3.6 } ]
+    },
+    "FY2": {
+      "speed": 110.0,
+      "azimuth": 1.2,
+      "bombs": [ { "deploy_time": 8.0, "explode_delay": 4.0 } ]
+    }
+  },
+  "Ms": ["M1", "M2"],
+  "VERBOSE": true
+}

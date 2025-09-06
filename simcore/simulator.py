@@ -9,7 +9,9 @@ SMOKE_LIFETIME_DEFAULT = 20.0
 SMOKE_DESCENT_DEFAULT = 3.0
 
 from .entities import Missile, Drone, Bomb, SmokeCloud, Cylinder
-from .occlusion import OcclusionEvaluator
+# Legacy OcclusionEvaluator removed in favor of direct cap-only occlusion dispatcher.
+# Side surface occlusion is intentionally ignored per new requirements.
+from judges.cylinder_occlusion import cylinder_caps_fully_occluded
 
 Vec3 = np.ndarray
 
@@ -34,11 +36,13 @@ class Simulator:
         emitted = [False] * len(self.schedules)
         bombs: List[Bomb] = []
         clouds: List[SmokeCloud] = []
-        evaluator = OcclusionEvaluator(
-            self.cylinder, n_theta=self.n_theta, n_h=self.n_h,
-            n_cap_radial=self.n_cap_radial, check_caps=self.check_caps,
-            method=self.occlusion_method,
-        )
+        # Removed OcclusionEvaluator construction (side surface no longer evaluated)
+        # (n_theta, n_h, n_cap_radial, check_caps retained as legacy config but unused here)
+        # evaluator = OcclusionEvaluator(
+        #     self.cylinder, n_theta=self.n_theta, n_h=self.n_h,
+        #     n_cap_radial=self.n_cap_radial, check_caps=self.check_caps,
+        #     method=self.occlusion_method,
+        # )
         t = 0.0
         occluded_time = 0.0
         timeline = []
@@ -69,9 +73,22 @@ class Simulator:
             V = self.missile.position(t)
             if len(active_spheres) == 0:
                 occluded = False
-                stats = dict(total_points=0, blocked_points=0, uncovered_indices=[], mode=self.occlusion_method)
+                # For cap-only logic, when no spheres active we report both caps not covered.
+                stats = dict(mode=self.occlusion_method, bottom=False, top=False, bottom_hits=[], top_hits=[])
             else:
-                occluded, stats = evaluator.fully_occluded(V, active_spheres)
+                # Map legacy sampling methods to exact cap judge since side surface is ignored now.
+                method = self.occlusion_method
+                if method in ("sampling", "sampling_torch"):
+                    method = "judge_caps"
+                occluded, info = cylinder_caps_fully_occluded(
+                    V,
+                    active_spheres,
+                    self.cylinder.C_base,
+                    self.cylinder.r,
+                    self.cylinder.h,
+                    method=method,
+                )
+                stats = info
             if occluded:
                 occluded_time += dt
             timeline.append(dict(

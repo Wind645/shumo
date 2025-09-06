@@ -54,6 +54,8 @@ import math
 import random
 import numpy as np
 import time
+import json
+from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -76,10 +78,11 @@ class CandidateRecord:
 @dataclass
 class LevelLog:
     fidelity: int
-    evaluated: int
-    kept: int
-    expanded: int
+    evaluated: int  # 原始进入该层的候选数量 (含上一层保留 + 扩展前)
+    kept: int       # 该层结束后进入下一层的数量
+    expanded: int   # 局部扩展数量
     elapsed_sec: float
+    plateau_injected: int = 0  # 平台期随机/自适应注入的数量
 
 @dataclass
 class MultiFidelityResult:
@@ -113,8 +116,23 @@ def optimize_multi_fidelity(
     perturb_scale: float = 0.15,
     local_expand: bool = True,
     expand_quota_ratio: float = 0.5,
+    # --- 新增: 平台期(所有 value 相同) 逃逸机制参数 ---
+    plateau_inject_ratio: float = 0.5,
+    plateau_adaptive_scale: float = 2.5,
+    plateau_detect_eps: float = 0.0,
+    # --- 新增: 极端稀疏目标支持 ---
+    sparse_positive_threshold: float = -1e-12,
+    sparse_escalate_factor: float = 1.5,
+    sparse_max_inject_per_level: int = 512,
+    # --- 新增: LHS 初始化与额外 level0 注入 ---
+    use_lhs_init: bool = True,
+    level0_lhs_extra_ratio: float = 0.5,
     seed: int | None = None,
     verbose: bool = True,
+    # --- 新增: 持久化与恢复 ---
+    save_path: str | None = None,
+    resume_path: str | None = None,
+    resume_inject_ratio: float = 0.15,   # 恢复时在历史最优附近注入 (ratio * init_candidates) 个扰动点
 ) -> MultiFidelityResult:
     """
     进行多保真优化的主函数 (最小化目标).
@@ -148,10 +166,58 @@ def optimize_multi_fidelity(
             for (lo, hi) in dim_bounds
         ]
 
-    # 初始化候选
-    population: List[CandidateRecord] = [
-        CandidateRecord(random_point()) for _ in range(init_candidates)
-    ]
+    # ---- LHS 采样函数 ----
+    def _lhs(n: int, d: int, rng_np: np.random.Generator) -> np.ndarray:
+        if n <= 0:
+            return np.zeros((0, d))
+        cut = np.linspace(0.0, 1.0, n + 1)
+        u = rng_np.random((n, d))
+        a = cut[:-1][:, None]
+        b = cut[1:][:, None]
+        pts = a + (b - a) * u  # (n,1) broadcast
+        # 每列独立打乱
+        for j in range(d):
+            rng_np.shuffle(pts[:, j])
+        return pts
+
+    # 初始化候选 (LHS 优先)
+    if use_lhs_init:
+        lhs_raw = _lhs(init_candidates, len(dim_bounds), np_rng)
+        population: List[CandidateRecord] = []
+        for r in lhs_raw:
+            vec = [lo + float(r[j]) * (hi - lo) for j, (lo, hi) in enumerate(dim_bounds)]
+            population.append(CandidateRecord(vec))
+        if verbose:
+            print(f"[MF] init using LHS n={init_candidates}")
+    else:
+        population = [CandidateRecord(random_point()) for _ in range(init_candidates)]
+    # ---------- Resume 支持 ----------
+    resume_best: List[float] | None = None
+    if resume_path:
+        try:
+            rp = Path(resume_path)
+            if rp.is_file():
+                data = json.loads(rp.read_text())
+                bx = data.get("best_x")
+                if isinstance(bx, list) and len(bx) == len(dim_bounds):
+                    resume_best = [float(v) for v in bx]
+                    if verbose:
+                        print(f"[MF][resume] loaded previous best from {resume_path}")
+        except Exception as e:
+            if verbose:
+                print(f"[MF][resume][warn] load failed: {e}")
+    if resume_best:
+        # 覆盖第一个
+        population[0].x = resume_best
+        # 注入局部扰动
+        k_inject = max(1, int(init_candidates * resume_inject_ratio))
+        span_arr = np.array([hi - lo for (lo, hi) in dim_bounds], dtype=float)
+        for i in range(1, min(1 + k_inject, len(population))):
+            noise = np_rng.normal(0.0, 1.0, size=len(dim_bounds)) * (0.05 * span_arr)
+            vec = [float(np.clip(resume_best[d] + noise[d], dim_bounds[d][0], dim_bounds[d][1])) for d in range(len(dim_bounds))]
+            population[i].x = vec
+        if verbose:
+            print(f"[MF][resume] injected {min(k_inject, len(population)-1)} local variants")
 
     history: List[LevelLog] = []
     t0_total = time.time()
@@ -172,6 +238,87 @@ def optimize_multi_fidelity(
                 if verbose and (i == 1 or i == total_eval or i % report_every == 0):
                     pct = 100.0 * i / total_eval
                     print(f"[MF] level={f} progress {i}/{total_eval} ({pct:.1f}%)")
+
+        # ------------------ 平台期检测 & 逃逸 ------------------
+        plateau_injected = 0
+        vmin = float('nan')  # Ensure defined for later plateau logging even if current_vals is empty
+        current_vals = [c.value_by_fidelity[f] for c in population]
+        if current_vals:
+            # 基础 min/max
+            vmin = min(current_vals); vmax = max(current_vals)
+            is_plateau = (vmax - vmin) <= plateau_detect_eps
+            # 额外: 忽略巨大惩罚值 (>=1e9) 只看“有效”子集是否平台
+            valid_vals = [v for v in current_vals if v < 1e9]
+            if len(valid_vals) >= 2:
+                vmin_v = min(valid_vals); vmax_v = max(valid_vals)
+                if (vmax_v - vmin_v) <= plateau_detect_eps:
+                    # 有效集合平台，且存在至少一个惩罚样本 或 有效集合跨度极小
+                    if len(valid_vals) < len(current_vals):
+                        is_plateau = True
+        else:
+            is_plateau = False
+        if is_plateau and f < fidelity_levels - 1:  # 只在非最终层做逃逸
+            if verbose:
+                print(f"[MF] level={f} detected plateau (all values={vmin:.6g}), injecting diversity")
+            # 1) 注入随机新点
+            inject_n = max(1, int(len(population) * plateau_inject_ratio))
+            for _ in range(inject_n):
+                new_c = CandidateRecord(random_point())
+                # 立即评估本层, 以便参与排序
+                new_c.value_by_fidelity[f] = float(evaluate(new_c.x, f))
+                population.append(new_c)
+            plateau_injected += inject_n
+            # 2) 对现有少量优者做强化扰动 (适度)
+            # 选取前 k (临时以全部，之后排序再截断)
+            k_seed = min(len(population), max(2, int(math.sqrt(len(population)))))
+            bases = population[:k_seed]
+            adapt_scale = perturb_scale * plateau_adaptive_scale
+            for parent in bases:
+                base = np.array(parent.x)
+                noise = np_rng.normal(0.0, 1.0, size=dim) * (adapt_scale * span)
+                child_vec = np.clip(base + noise, [lo for (lo, _) in dim_bounds], [hi for (_, hi) in dim_bounds])
+                child = CandidateRecord(list(map(float, child_vec)))
+                child.value_by_fidelity[f] = float(evaluate(child.x, f))
+                population.append(child)
+                plateau_injected += 1
+            if verbose:
+                print(f"[MF] level={f} plateau injection total={plateau_injected} (random + adaptive)")
+
+        # ------------------ 稀疏: 尚无任何“好”点时全局加采样 ------------------
+        # “好”点定义: value < sparse_positive_threshold (例如 -occ < 0 => occ>0)
+        has_positive = any(v < sparse_positive_threshold for v in current_vals)
+        if (not has_positive) and f < fidelity_levels - 1:
+            # 仍未发现有效区域：扩大随机探索覆盖
+            target_size = int(len(population) * sparse_escalate_factor)
+            # 上限控制: 不超过 初始 * (sparse_escalate_factor ** (f+1))
+            theoretical_cap = int(init_candidates * (sparse_escalate_factor ** (f + 1)))
+            target_size = min(target_size, theoretical_cap)
+            need = target_size - len(population)
+            if need > 0:
+                need = min(need, sparse_max_inject_per_level)
+                if verbose:
+                    print(f"[MF] level={f} sparse escalate: injecting {need} fresh (no good sample yet)")
+                for _ in range(need):
+                    nc = CandidateRecord(random_point())
+                    nc.value_by_fidelity[f] = float(evaluate(nc.x, f))
+                    population.append(nc)
+                plateau_injected += need  # 复用字段统计注入 (虽然语义不同)
+
+        # ---- Level0 结束前额外 LHS 注入：仍无命中且未触发 plateau_injected 足够 ----
+        if f == 0 and (not has_positive) and level0_lhs_extra_ratio > 0 and len(population) < int(init_candidates * (1.0 + level0_lhs_extra_ratio * 1.5)):
+            extra_n = int(init_candidates * level0_lhs_extra_ratio)
+            if extra_n > 0:
+                lhs_extra = _lhs(extra_n, dim, np_rng)
+                injected = 0
+                for r in lhs_extra:
+                    vec = [lo + float(r[j]) * (hi - lo) for j, (lo, hi) in enumerate(dim_bounds)]
+                    c_new = CandidateRecord(vec)
+                    c_new.value_by_fidelity[f] = float(evaluate(c_new.x, f))
+                    population.append(c_new)
+                    injected += 1
+                plateau_injected += injected
+                if verbose:
+                    print(f"[MF] level=0 extra LHS inject={injected} (no positive yet)")
 
         # 排序 — 使用当前 fidelity 的值
         population.sort(key=lambda c: c.value_by_fidelity[f])
@@ -213,11 +360,12 @@ def optimize_multi_fidelity(
             kept=len(population),
             expanded=expanded,
             elapsed_sec=elapsed,
+            plateau_injected=plateau_injected,
         ))
         if verbose:
             best_val = population[0].value_by_fidelity[f]
             print(f"[MF] level={f} evaluated={n_before} kept={len(population)} "
-                  f"expanded={expanded} best={best_val:.6g} time={elapsed:.3f}s")
+                  f"expanded={expanded} plateau_injected={plateau_injected} best={best_val:.6g} time={elapsed:.3f}s")
 
     # 汇总最高保真 (即 f = fidelity_levels-1)
     f_final = fidelity_levels - 1
@@ -239,6 +387,19 @@ def optimize_multi_fidelity(
             seed=seed,
         )
     )
+    if save_path:
+        try:
+            out = {
+                "best_x": result.best_x,
+                "best_value": float(result.best_value),
+                "meta": result.meta,
+            }
+            Path(save_path).write_text(json.dumps(out, ensure_ascii=False, indent=2))
+            if verbose:
+                print(f"[MF] saved result to {save_path}")
+        except Exception as e:
+            if verbose:
+                print(f"[MF][warn] failed to save result: {e}")
     if verbose:
         print(f"[MF] DONE best_value={best_value:.6g} time={result.meta['total_time']:.3f}s")
     return result

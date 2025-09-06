@@ -49,15 +49,22 @@ from api.problems import evaluate_problem3
 BOMBS_COUNT = 3                # 炸弹数 (与题 3 需求一致, 可更改)
 FIDELITY_CONFIG: List[Dict] = [
     # 每个字典定义一个 fidelity 等级的评估配置
+    # NOTE: 若后续需要使用新的 router (occlusion_time_router + evaluate_q3_router) 进行
+    # 单次批量矢量化评估，可在优化逻辑中将此处的 method 映射为:
+    #   rough_caps_torch -> torch_rough
+    #   judge_caps_torch -> torch_exact
+    #   rough_caps      -> numpy_rough
+    #   judge_caps      -> numpy_exact
+    # 并调用 evaluate_q3_router(judge=...) 获取相同结构的结果，从而减少多次逐帧判定的开销。
     {"dt": 0.10, "method": "rough_caps_torch"},
     {"dt": 0.05, "method": "rough_caps_torch"},
-    {"dt": 0.02, "method": "rough_caps_torch"},  # 最高保真
+    {"dt": 0.02, "method": "rough_caps_torch"},  # 最高保真 (可映射为 torch_exact / torch_rough)
 ]
 INIT_CANDIDATES = 96           # 初始随机点
 ETA = 1.0                      # successive halving 比例 越大越狠
 PERTURB_SCALE = 0.18           # 局部扰动幅度(相对各维跨度)
 EXPAND_RATIO = 0.6             # 每层扩展比例
-SEED = 42
+SEED = 420
 VERBOSE = True
 MAX_HIGH_FIDELITY = None       # 可设为整数限制最终层候选
 # -------------------------------------------------------

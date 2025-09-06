@@ -2,8 +2,9 @@ from __future__ import annotations
 from typing import Dict, List, Tuple, Iterable, Optional, Union
 import numpy as np
 from simcore import (
-    Missile, Drone, Cylinder, Simulator, OcclusionEvaluator,
+    Missile, Drone, Cylinder, Simulator,
 )
+from judges.cylinder_occlusion import cylinder_caps_fully_occluded
 
 # ---- Inlined baseline constants (was simcore.constants) ----
 SMOKE_RADIUS_DEFAULT = 10.0
@@ -88,7 +89,9 @@ def build_drones_and_schedules(decision: Dict) -> Tuple[List[Drone], List[Tuple[
     return drones, schedules
 
 MISSILES_DEF = {
-    name: dict(pos0=pos.astype(float), speed=MISSILE_SPEED, target=FAKE_TARGET)
+    # Fix: missiles should fly toward the common origin (fake target),
+    # not toward their own starting position (which caused zero-length direction).
+    name: dict(target=FAKE_TARGET_ORIGIN.astype(float), speed=float(MISSILE_SPEED))
     for name, pos in MISSILES_POS0.items()
 }
 
@@ -100,26 +103,35 @@ def _build_missiles(which: Union[str, List[str]]) -> Dict[str, Missile]:
     res: Dict[str, Missile] = {}
     for k in keys:
         spec = MISSILES_DEF[k]
-        res[k] = Missile(id=int(k[1]), target=spec["target"], speed=spec["speed"])
+        res[k] = Missile(id=int(k[1]), target=_as_vec3(spec["target"]), speed=float(spec["speed"]))
     return res
 
 def _max_flight_time(missiles: Dict[str, Missile]) -> float:
-    return max(m.flight_time for m in missiles.values())
+    return float(max(m.flight_time for m in missiles.values()))
 
 def _eval_occlusion_over_timeline(missiles: Dict[str, Missile], timeline: List[Dict], cyl: Cylinder, method: str) -> Dict[str, float]:
-    evaluator = OcclusionEvaluator(cyl, method=method)
+    """
+    Cap-only occlusion accumulation over timeline.
+    Side surface explicitly ignored per new requirement.
+    We map any legacy sampling* methods onto exact cap judge.
+    """
     occluded_time: Dict[str, float] = {k: 0.0 for k in missiles.keys()}
+    method_norm = method
+    if method_norm in ("sampling", "sampling_torch"):
+        method_norm = "judge_caps"
     dt = float(timeline[1]["t"] - timeline[0]["t"]) if len(timeline) >= 2 else 0.05
     for rec in timeline:
         t = float(rec["t"])
         spheres = [(S, R) for (S, R) in rec.get("clouds", [])]
+        if not spheres:
+            continue
         for name, m in missiles.items():
             if t > m.flight_time + 1e-12:
                 continue
-            if not spheres:
-                continue
             V = m.position(t)
-            ok, _ = evaluator.fully_occluded(V, spheres)
+            ok, _info = cylinder_caps_fully_occluded(
+                V, spheres, cyl.C_base, cyl.r, cyl.h, method=method_norm
+            )
             if ok:
                 occluded_time[name] += dt
     return occluded_time
@@ -133,13 +145,8 @@ def simulate_with_decision(
     missiles = _build_missiles(which)
     T_max = _max_flight_time(missiles)
     first_missile: Missile = list(missiles.values())[0]
-    # 兼容: C_BASE_DEFAULT 可能是 torch.Tensor 或 numpy.ndarray
-    if hasattr(C_BASE_DEFAULT, 'clone'):
-        _c_base = C_BASE_DEFAULT.clone()
-    elif hasattr(C_BASE_DEFAULT, 'copy'):
-        _c_base = C_BASE_DEFAULT.copy()
-    else:
-        _c_base = C_BASE_DEFAULT
+    # Cylinder base constant: normalize to plain numpy array (remove .clone() path to avoid pyright confusion)
+    _c_base = np.asarray(C_BASE_DEFAULT, dtype=float)
     cyl = Cylinder(C_base=_c_base, r=R_CYL_DEFAULT, h=H_CYL_DEFAULT)
     sim = Simulator(
         missile=first_missile,

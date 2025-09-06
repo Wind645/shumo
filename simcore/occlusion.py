@@ -4,6 +4,21 @@ import numpy as np
 
 # 原先依赖 baolijiefa.CylinderOcclusionJudge 提供的线段-球相交与采样逻辑。
 # 该文件已移除, 这里内联最小必要函数, 避免额外抽象。
+# NOTE (migration):
+#   新的统一圆柱遮挡判定/采样工具已迁移到 judges.cylinder_occlusion 模块中
+#   (提供 sampling / judge_caps / rough_caps 以及对应 torch 版本)。
+#   后续新代码若仅需判定，可直接:
+#       from judges.cylinder_occlusion import cylinder_caps_fully_occluded_exact
+#   或使用:
+#       from judges.cylinder_occlusion import (
+#           cylinder_fully_occluded_sampling,
+#           cylinder_caps_fully_occluded_exact,
+#           cylinder_caps_fully_occluded_rough,
+#           cylinder_fully_occluded_sampling_torch,
+#           cylinder_caps_fully_occluded_exact_torch,
+#           cylinder_caps_fully_occluded_rough_torch,
+#       )
+#   本文件仍保留以兼容现有 simcore 内部调用；清理完成后可考虑删除，统一走 judges/。
 def _segment_intersects_sphere(V: np.ndarray, P: np.ndarray, S: np.ndarray, R: float) -> bool:
     """线段 VP 与球(S,R) 是否相交 (存在 t∈[0,1] 使得 |V + t(P-V) - S| <= R)。"""
     V = np.asarray(V, dtype=np.float64)
@@ -78,6 +93,15 @@ if TORCH_AVAILABLE:
         TORCH_AVAILABLE = False
 
 Vec3 = np.ndarray
+# --- Guarantee optional torch symbols exist (avoid “possibly unbound” diagnostics) ---
+try:
+    TorchRoughVectorizedOcclusionJudge  # type: ignore[name-defined]
+except NameError:
+    TorchRoughVectorizedOcclusionJudge = None  # type: ignore
+try:
+    vectorized_circle_fully_occluded_by_sphere_torch  # type: ignore[name-defined]
+except NameError:
+    vectorized_circle_fully_occluded_by_sphere_torch = None  # type: ignore
 
 class OcclusionEvaluator:
     def __init__(self, cyl: Cylinder, n_theta: int = 48, n_h: int = 16,
@@ -134,6 +158,8 @@ class OcclusionEvaluator:
         total = int(pts.shape[0]) if pts is not None else 0
         blocked = 0
         uncovered = []
+        if pts is None:
+            return False, dict(total_points=0, blocked_points=0, uncovered_indices=[], note="no_points")
         for i, P in enumerate(pts):
             if self._hit_any_sphere(V, P, spheres):
                 blocked += 1
@@ -183,6 +209,8 @@ class OcclusionEvaluator:
         r_t = torch.as_tensor(r_arr, dtype=torch.float64)
         S_t = torch.as_tensor(S_arr, dtype=torch.float64)
         R_t = torch.as_tensor(R_arr, dtype=torch.float64)
+        if 'vectorized_circle_fully_occluded_by_sphere_torch' not in globals() or vectorized_circle_fully_occluded_by_sphere_torch is None:
+            return False, []
         res = vectorized_circle_fully_occluded_by_sphere_torch(V_t, C_t, r_t, S_t, R_t)
         hits_idx = res.occluded.nonzero().flatten().tolist()
         return (len(hits_idx) > 0), hits_idx[:8]
@@ -201,7 +229,13 @@ class OcclusionEvaluator:
         r_arr = np.full(n, r_cap, dtype=np.float32)
         S_arr = np.stack([s[0] for s in spheres_list]).astype(np.float32)
         R_arr = np.array([s[1] for s in spheres_list], dtype=np.float32)
-        judge = TorchRoughVectorizedOcclusionJudge(device='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.float32)
+        if 'TorchRoughVectorizedOcclusionJudge' not in globals() or TorchRoughVectorizedOcclusionJudge is None:
+            return False, []
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        # if not hasattr(self, '_rough_caps_torch_device_logged'):
+        #     print(f"[OcclusionTorch] rough_caps_torch using device={device}")
+        #     self._rough_caps_torch_device_logged = True
+        judge = TorchRoughVectorizedOcclusionJudge(device=device, dtype=torch.float32)
         res = judge.judge_batch(V_arr, C_arr, r_arr, S_arr, R_arr)
         hits_idx = res.occluded.nonzero().flatten().tolist()
         return (len(hits_idx) > 0), hits_idx[:8]

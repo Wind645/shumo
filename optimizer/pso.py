@@ -1,22 +1,22 @@
-# Particle Swarm Optimization framework with parallel simulation evaluation.
+# Particle Swarm Optimization framework with parallel simulation evaluation + JSON model initialization & persistence.
 from __future__ import annotations
 
 import math
 import random
 import time
 from dataclasses import dataclass
-from typing import Callable, Iterable, List, Sequence, Tuple, Optional, Union
+from typing import Callable, Iterable, List, Sequence, Tuple, Optional, Union, Any, Dict
 import numpy as np
 import multiprocessing as mp
 import functools
 import os
 import sys
+import json
+from datetime import datetime
 
-# Local import (lightweight) - handle script/module execution path issues
 try:
     from simulator import Simulator
 except ImportError:
-    # When running as "python optimizer/pso.py", add project root to sys.path
     sys.path.append(os.path.dirname(os.path.dirname(__file__)))
     from simulator import Simulator
 
@@ -27,6 +27,32 @@ Design goals:
  - Random reset mechanism to mitigate premature convergence (escape local optima).
  - Strategy encoders/decoders translating flat particle vectors into Simulator strategy objects.
  - Flexible objective aggregation (sum / min / weighted) over multiple missiles.
+ - NEW: Ability to bootstrap swarm from previously saved JSON model (warm start) and
+        automatically save new results for iterative refinement.
+
+JSON warm start file (placed under ../models):
+{
+  "schema": 1,
+  "problem_id": 2,
+  "dim": 4,
+  "saved_at": "2025-09-06T12:34:56Z",
+  "best_fitness": 4.321,
+  "best_position": [...],
+  "swarm_positions": [[...], [...], ...],          # optional
+  "notes": "optional free-form text"
+}
+
+Loading rules:
+ - If 'swarm_positions' matches the requested dimension it seeds the swarm directly.
+ - Else if only 'best_position' is present, the whole swarm is initialized as
+   best_position plus Gaussian noise (std=perturb_std).
+ - Dimension mismatches raise ValueError (protect against accidental misuse).
+
+Saving:
+ - Call ParallelPSO.save_model(name) manually OR pass save_on_exit="run_name"
+   into the constructor to auto-save after run().
+ - When include_swarm=True we also persist full swarm positions.
+ - Files are written to ../models/{name}.json ('.json' appended if missing).
 
 Encoding overview (all continuous variables; angles in radians):
 
@@ -70,7 +96,6 @@ def sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 def positive(x: float) -> float:
-    # Smooth-ish positivity
     return math.log1p(math.exp(x))  # softplus
 
 def clamp(v: float, lo: float, hi: float) -> float:
@@ -79,37 +104,29 @@ def clamp(v: float, lo: float, hi: float) -> float:
 
 # ----------------------------- Strategy encoders -----------------------------
 class StrategyEncoder:
-    """
-    Base class: map particle vector -> simulator strategy object.
-    Subclasses define dimension (dim) and implement encode(position) -> strategy.
-    """
     dim: int
 
     def encode(self, position: Sequence[float]):
-       # To be overridden
-       raise NotImplementedError
+        raise NotImplementedError
 
     def initial_position(self) -> np.ndarray:
-       # Random initial vector in [-1,1]
-       return np.random.uniform(-1, 1, self.dim)
+        return np.random.uniform(-1, 1, self.dim)
 
 
 class Problem2Encoder(StrategyEncoder):
-    dim = 4  # angle, speed_raw, release_raw, fuse_raw
+    dim = 4
 
     def encode(self, position: Sequence[float]):
         angle, speed_raw, release_raw, fuse_raw = position
-        # angle -> direction on XY plane
         dir_vec = np.array([math.cos(angle), math.sin(angle), 0.0])
-        speed = 70.0 + sigmoid(speed_raw)*70.0  # 70-140
-        release_time = positive(release_raw)   # >=0
+        speed = 70.0 + sigmoid(speed_raw)*70.0
+        release_time = positive(release_raw)
         fuse = clamp(positive(fuse_raw), 0.1, 15.0)
-        strat = (dir_vec, float(speed), [[float(release_time), float(fuse)]])
-        return strat
+        return (dir_vec, float(speed), [[float(release_time), float(fuse)]])
 
 
 class Problem3Encoder(StrategyEncoder):
-    dim = 8  # angle, speed_raw, r1,f1,gap2,f2,gap3,f3
+    dim = 8
 
     def encode(self, position: Sequence[float]):
         angle, speed_raw, r1_raw, f1_raw, gap2_raw, f2_raw, gap3_raw, f3_raw = position
@@ -127,32 +144,26 @@ class Problem3Encoder(StrategyEncoder):
 
 
 class Problem4Encoder(StrategyEncoder):
-    # 3 drones * problem2 dims (4) = 12
     dim = 12
 
     def encode(self, position: Sequence[float]):
-        # Split into 3 chunks
         chunks = [position[i:i+4] for i in range(0, 12, 4)]
         encoder = Problem2Encoder()
         drones = [encoder.encode(c) for c in chunks]
-        # Return tuple expected by Simulator
         return tuple(drones)  # type: ignore
 
 
 class Problem5Encoder(StrategyEncoder):
-    # Each drone: angle, speed_raw, (act1,r1,f1),(act2,gap2,f2),(act3,gap3,f3) = 2 + 9 = 11
-    dim = 11 * 5  # 55
+    dim = 55
 
     def encode_single(self, vec: Sequence[float]):
         angle, speed_raw, act1, r1_raw, f1_raw, act2, gap2_raw, f2_raw, act3, gap3_raw, f3_raw = vec
         dir_vec = np.array([math.cos(angle), math.sin(angle), 0.0])
         speed = 70.0 + sigmoid(speed_raw)*70.0
-        # Activation
         a1 = sigmoid(act1)
         a2 = sigmoid(act2)
         a3 = sigmoid(act3)
         bombs = []
-        # Build times sequentially for active bombs
         if a1 > 0.5:
             t1 = positive(r1_raw)
             bombs.append([float(t1), clamp(positive(f1_raw), 0.1, 15.0)])
@@ -173,7 +184,6 @@ class Problem5Encoder(StrategyEncoder):
         return tuple(drones)  # type: ignore
 
 
-# Map problem id -> encoder class helper
 ENCODERS = {
     2: Problem2Encoder(),
     3: Problem3Encoder(),
@@ -188,14 +198,6 @@ def simulate_fitness(problem_id: int,
                      dt: float = 0.05,
                      aggregate: str = "sum",
                      weights: Optional[Sequence[float]] = None) -> float:
-    """
-    Convert a flat vector to simulator strategy using encoder,
-    run simulation, compute occlusion metric.
-
-    aggregate: 'sum' (default) sums occlusion times over missiles
-               'min' uses minimum occlusion time (balance across missiles)
-               'weighted' uses provided weights (len=missile_count)
-    """
     encoder = ENCODERS[problem_id]
     strategy = encoder.encode(strategy_vector)
     sim = Simulator(problem_id=problem_id, dt=dt, strategy=strategy)
@@ -203,13 +205,11 @@ def simulate_fitness(problem_id: int,
     times = sim.compute_batch_occlusions()
     if not times:
         return 0.0
-    # Penalty: if any drone releases two bombs with time separation < 1s multiply fitness by 0.2
     penalty_factor = 1.0
-    # Normalize strategy form to iterable of drone triplets (dir, speed, bombs)
     if problem_id in (2, 3):
         drones = [strategy]
     else:
-        drones = list(strategy)  # tuple -> list
+        drones = list(strategy)  # type: ignore
     try:
         for d in drones:
             bombs = d[2]
@@ -223,7 +223,6 @@ def simulate_fitness(problem_id: int,
             if penalty_factor < 1.0:
                 break
     except Exception:
-        # If structure unexpected, fall back without penalty
         pass
     if aggregate == "sum":
         base = float(sum(times))
@@ -231,9 +230,9 @@ def simulate_fitness(problem_id: int,
         base = float(min(times))
     elif aggregate == "weighted":
         if weights is None:
-            raise ValueError("weights required for weighted aggregation")
+           raise ValueError("weights required for weighted aggregation")
         if len(weights) != len(times):
-            raise ValueError("weights length mismatch")
+           raise ValueError("weights length mismatch")
         base = float(sum(w*t for w, t in zip(weights, times)))
     else:
         raise ValueError(f"Unknown aggregate: {aggregate}")
@@ -244,7 +243,6 @@ _GLOBAL_OBJECTIVE = None
 _GLOBAL_MAXIMIZE = True
 
 def _worker_init(seed_base: int, objective, maximize: bool):
-    # Store objective & config in globals for workers (pickle-safe)
     global _GLOBAL_OBJECTIVE, _GLOBAL_MAXIMIZE
     _GLOBAL_OBJECTIVE = objective
     _GLOBAL_MAXIMIZE = maximize
@@ -260,7 +258,6 @@ def _worker_eval_vector(x: Sequence[float]):
         return -1e9 if _GLOBAL_MAXIMIZE else 1e9
 
 
-# ----------------------------- Parallel PSO Core -----------------------------
 @dataclass
 class PSOResult:
     best_position: np.ndarray
@@ -271,6 +268,18 @@ class PSOResult:
 
 
 class ParallelPSO:
+    """
+    Parallel Particle Swarm Optimizer with optional warm start from JSON model
+    and automatic persistence.
+
+    Parameters (additions):
+      init_model: Optional base name of JSON file in models directory used to seed swarm.
+      perturb_std: Stddev for Gaussian noise added around best_position when only
+                   a single vector is available in the JSON warm start.
+      models_dir: Override models directory (default ../models relative to this file).
+      save_on_exit: If provided, automatically save model with this base name after run().
+      include_swarm_on_save: Whether to persist full swarm when auto-saving.
+    """
     def __init__(self,
                  dim: int,
                  objective: Callable[[Sequence[float]], float],
@@ -284,7 +293,12 @@ class ParallelPSO:
                  maximize: bool = True,
                  processes: Optional[int] = None,
                  seed: Optional[int] = None,
-                 best_times_fn: Optional[Callable[[Sequence[float]], List[float]]] = None):
+                 best_times_fn: Optional[Callable[[Sequence[float]], List[float]]] = None,
+                 init_model: Optional[str] = None,
+                 perturb_std: float = 0.1,
+                 models_dir: Optional[str] = None,
+                 save_on_exit: Optional[str] = None,
+                 include_swarm_on_save: bool = True):
         self.dim = dim
         self.objective = objective
         self.swarm_size = swarm_size
@@ -300,12 +314,16 @@ class ParallelPSO:
         random.seed(self.seed)
         np.random.seed(self.seed)
         self.best_times_fn = best_times_fn
+        self.init_model = init_model
+        self.perturb_std = float(perturb_std)
+        self.models_dir = models_dir or os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
+        self.save_on_exit = save_on_exit
+        self.include_swarm_on_save = include_swarm_on_save
 
-        # Swarm state
+        # Initialize swarm (random first; may be overwritten by warm start)
         self.positions = np.random.uniform(-1, 1, (swarm_size, dim))
         self.velocities = np.zeros((swarm_size, dim))
         self.personal_best_positions = self.positions.copy()
-        # Initialize personal best fitness with -inf for maximization or +inf for minimization
         if self.maximize:
             self.personal_best_fitness = np.full(swarm_size, -np.inf)
             self.global_best_fitness = -np.inf
@@ -314,8 +332,93 @@ class ParallelPSO:
             self.global_best_fitness = np.inf
         self.global_best_position = self.positions[0].copy()
 
+        # Attempt warm start
+        if self.init_model:
+            try:
+                self._load_warm_start(self.init_model)
+            except Exception as e:
+                print(f"[PSO] Warm start load failed ({e}); falling back to random initialization.", flush=True)
+
+    # ----------------- Warm Start Loader -----------------
+    def _resolve_model_path(self, name: str) -> str:
+        if not name.endswith(".json"):
+            name = name + ".json"
+        return os.path.join(self.models_dir, name)
+
+    def _load_warm_start(self, name: str):
+        path = self._resolve_model_path(name)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Model JSON not found: {path}")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("Warm start JSON root must be object")
+        if "dim" in data and data["dim"] != self.dim:
+            raise ValueError(f"Warm start dim mismatch: file={data['dim']} expected={self.dim}")
+        if "swarm_positions" in data:
+            swarm = data["swarm_positions"]
+            if (not isinstance(swarm, list)) or len(swarm) == 0:
+                raise ValueError("swarm_positions must be non-empty list")
+            arr = np.asarray(swarm, dtype=float)
+            if arr.shape[1] != self.dim:
+                raise ValueError(f"swarm_positions inner dim mismatch: {arr.shape[1]} != {self.dim}")
+            # Resize or pad/crop to swarm_size
+            if arr.shape[0] >= self.swarm_size:
+                self.positions = arr[:self.swarm_size].copy()
+            else:
+                # Tile to reach desired size
+                reps = (self.swarm_size + arr.shape[0] - 1) // arr.shape[0]
+                tiled = np.tile(arr, (reps, 1))[:self.swarm_size]
+                self.positions = tiled.copy()
+            print(f"[PSO] Warm start: loaded {arr.shape[0]} swarm positions from {os.path.basename(path)}", flush=True)
+        elif "best_position" in data:
+            best_pos = np.asarray(data["best_position"], dtype=float)
+            if best_pos.shape[0] != self.dim:
+                raise ValueError(f"best_position dim mismatch: {best_pos.shape[0]} != {self.dim}")
+            noise = np.random.normal(0.0, self.perturb_std, (self.swarm_size, self.dim))
+            self.positions = best_pos[None, :] + noise
+            print(f"[PSO] Warm start: seeded swarm around best_position with std={self.perturb_std}", flush=True)
+        else:
+            raise ValueError("Warm start JSON must contain 'swarm_positions' or 'best_position'")
+        # Reset dependent state
+        self.velocities = np.zeros_like(self.positions)
+        self.personal_best_positions = self.positions.copy()
+        if self.maximize:
+            self.personal_best_fitness.fill(-np.inf)
+            self.global_best_fitness = -np.inf
+        else:
+            self.personal_best_fitness.fill(np.inf)
+            self.global_best_fitness = np.inf
+        self.global_best_position = self.positions[0].copy()
+        print(f"[PSO] Warm start complete. Swarm size={self.swarm_size} dim={self.dim}", flush=True)
+
+    # ----------------- Persistence -----------------
+    def save_model(self,
+                   name: str,
+                   include_swarm: bool = True,
+                   notes: Optional[str] = None,
+                   extra: Optional[Dict[str, Any]] = None):
+        os.makedirs(self.models_dir, exist_ok=True)
+        path = self._resolve_model_path(name)
+        payload: Dict[str, Any] = {
+            "schema": 1,
+            "dim": self.dim,
+            "saved_at": datetime.utcnow().isoformat() + "Z",
+            "best_fitness": float(self.global_best_fitness),
+            "best_position": self.global_best_position.tolist(),
+        }
+        if include_swarm:
+            payload["swarm_positions"] = self.positions.tolist()
+        if notes:
+            payload["notes"] = notes
+        if extra:
+            payload.update(extra)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"[PSO] Model saved to {path}", flush=True)
+
+    # ----------------- Core -----------------
     def _evaluate_batch(self, batch: np.ndarray) -> List[float]:
-        # Parallel map using global objective inside workers
         with mp.Pool(processes=self.processes,
                      initializer=_worker_init,
                      initargs=(self.seed, self.objective, self.maximize)) as pool:
@@ -323,20 +426,18 @@ class ParallelPSO:
         return fitness
 
     def _objective_wrapper(self, x: Sequence[float]) -> float:
-        # Legacy (unused) kept for reference; evaluation handled in worker via globals
         return self.objective(x)
 
     def run(self) -> PSOResult:
         start = time.time()
-        history = []
+        history: List[float] = []
         eval_count = 0
 
         for it in range(self.iterations):
-            # Random resets to escape local optima
             reset_mask = np.random.rand(self.swarm_size) < self.reset_prob
             if reset_mask.any():
                 self.positions[reset_mask] = np.random.uniform(-1, 1,
-                                                               (reset_mask.sum(), self.dim))
+                                                                (reset_mask.sum(), self.dim))
                 self.velocities[reset_mask] = 0.0
 
             fitness = self._evaluate_batch(self.positions)
@@ -347,7 +448,6 @@ class ParallelPSO:
                 if better:
                     self.personal_best_fitness[i] = fit
                     self.personal_best_positions[i] = self.positions[i].copy()
-            # Global best
             best_idx = int(np.argmax(self.personal_best_fitness) if self.maximize else
                            np.argmin(self.personal_best_fitness))
             best_fit = self.personal_best_fitness[best_idx]
@@ -363,7 +463,6 @@ class ParallelPSO:
             else:
                 print(f"[PSO] Iter {it+1}/{self.iterations} best_fitness={self.global_best_fitness:.6f}", flush=True)
 
-            # Update velocities & positions
             r1 = np.random.rand(self.swarm_size, self.dim)
             r2 = np.random.rand(self.swarm_size, self.dim)
             cognitive_term = self.c1 * r1 * (self.personal_best_positions - self.positions)
@@ -375,16 +474,21 @@ class ParallelPSO:
             self.positions += self.velocities
 
         elapsed = time.time() - start
-        return PSOResult(
+        result = PSOResult(
             best_position=self.global_best_position.copy(),
             best_fitness=float(self.global_best_fitness),
             history=history,
             eval_count=eval_count,
             elapsed=elapsed
         )
+        if self.save_on_exit:
+            try:
+                self.save_model(self.save_on_exit, include_swarm=self.include_swarm_on_save)
+            except Exception as e:
+                print(f"[PSO] Auto-save failed: {e}", flush=True)
+        return result
 
 
-# ----------------------------- Convenience factory -----------------------------
 def _objective_dispatch(vec: Sequence[float],
                         problem_id: int,
                         dt: float,
@@ -399,7 +503,6 @@ def build_problem_objective(problem_id: int,
     if problem_id not in ENCODERS:
         raise ValueError("PSO only needed for problems 2-5")
     encoder = ENCODERS[problem_id]
-    # Use functools.partial so the callable is picklable for multiprocessing
     objective = functools.partial(_objective_dispatch,
                                   problem_id=problem_id,
                                   dt=dt,
@@ -409,60 +512,38 @@ def build_problem_objective(problem_id: int,
 
 def build_problem_times_fn(problem_id: int,
                            dt: float = 0.05) -> Callable[[Sequence[float]], List[float]]:
-    """
-    Build a callable that returns the per-missile occlusion times (list[float]) for a
-    given flat strategy vector, without applying aggregation or penalties.
-
-    This is useful to pass into ParallelPSO as best_times_fn so each iteration
-    can report the raw occlusion distribution for the current global best.
-
-    Parameters
-    ----------
-    problem_id : int
-        Problem identifier (2-5).
-    dt : float
-        Simulator timestep.
-
-    Returns
-    -------
-    Callable[[Sequence[float]], List[float]]
-        Function mapping a flat vector to per-missile occlusion seconds.
-    """
     if problem_id not in ENCODERS:
         raise ValueError("PSO only needed for problems 2-5")
     encoder = ENCODERS[problem_id]
-
     def _times(vec: Sequence[float]) -> List[float]:
         strategy = encoder.encode(vec)
         sim = Simulator(problem_id=problem_id, dt=dt, strategy=strategy)
         sim.run_until_end()
         return sim.compute_batch_occlusions()
-
     return _times
 
 
-# ----------------------------- Example usage -----------------------------
 if __name__ == "__main__":
-    # Example: optimize Problem 2 (single drone, one bomb) using strict full-coverage occlusion (now the default)
+    # Example usage with warm start & auto-save
     problem_id = 2
     encoder, obj = build_problem_objective(problem_id, dt=0.01, aggregate="sum")
     times_fn = build_problem_times_fn(problem_id, dt=0.01)
     pso = ParallelPSO(dim=encoder.dim,
                       objective=obj,
-                      swarm_size=72,
-                      iterations=128,
+                      swarm_size=100,
+                      iterations=50,
                       reset_prob=0.05,
                       velocity_clamp=(-0.5, 0.5),
                       processes=4,
                       seed=42,
-                      best_times_fn=times_fn)
+                      best_times_fn=times_fn,
+                      init_model="problem2_latest",   # optional warm start
+                      perturb_std=0.15,
+                      save_on_exit="problem2_latest",
+                      include_swarm_on_save=True)
     result = pso.run()
     print("Best fitness:", result.best_fitness)
     print("Best position vector:", result.best_position)
-    # Decode to human-readable strategy
     strategy = encoder.encode(list(result.best_position))
     print("Decoded strategy:", strategy)
-    print("History (best so far):", result.history)
-
-    # You can similarly optimize problems 3-5 by changing problem_id, though
-    # higher dimensions will require more iterations and larger swarm sizes.
+    print("History length:", len(result.history))

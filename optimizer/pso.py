@@ -191,6 +191,54 @@ ENCODERS = {
     5: Problem5Encoder(),
 }
 
+# ----------------------------- Judge selection -----------------------------
+CURRENT_JUDGE = "rough"
+def select_judge(name: str, *, K: int = 32, verbose: bool = True):
+    """
+    选择遮挡判定函数 (judge)。必须在创建 Simulator / 运行 PSO 前调用。
+
+    可选:
+      "rough" / "batch_rough"   : 角度解析法 (judges.batch_rough.is_sphere_blocked_vectorized)
+      "sample" / "batch_sample" : 采样法 (judges.batch_sample.is_cylinder_blocked_vectorized) — 用上下底面各 K 个点。
+
+    两者对 Simulator 的接口统一为:
+        fn(data: ndarray shape (N,7)) -> ndarray(bool shape (N,))
+
+    参数:
+      name: 选择名称
+      K:    仅当选择 sample 时生效，表示每个底面采样点数 (默认 32)
+      verbose: 是否打印切换信息
+
+    用法:
+      from optimizer.pso import select_judge
+      select_judge("sample", K=48)
+      # 之后 build_problem_objective / ParallelPSO 即使用采样判定
+
+    注意:
+      - 多进程下 (PSO 使用进程池) 每个子进程初始化时会重新导入模块，
+        因此在创建 PSO 之前调用即可；子进程中会看到修改后的 simulator.is_sphere_blocked_vectorized。
+      - 若在运行中途再次切换，对已经运行中的仿真不追溯，但后续新建 Simulator 会使用新 judge。
+    """
+    global CURRENT_JUDGE
+    import simulator as _sim
+    if name in {"rough", "batch_rough"}:
+        from judges.batch_rough import is_sphere_blocked_vectorized as _fn
+        _sim.is_sphere_blocked_vectorized = _fn
+        CURRENT_JUDGE = "rough"
+        if verbose:
+            print("[Judge] Switched to rough analytic judge.")
+    elif name in {"sample", "batch_sample"}:
+        from judges.batch_sample import is_cylinder_blocked_vectorized
+        def _wrapped(data, _K=K):
+            return is_cylinder_blocked_vectorized(data, K=_K)
+        _wrapped.__name__ = "is_sphere_blocked_vectorized"
+        _sim.is_sphere_blocked_vectorized = _wrapped
+        CURRENT_JUDGE = f"sample(K={K})"
+        if verbose:
+           print(f"[Judge] Switched to sampling judge with K={K}.")
+    else:
+        raise ValueError("Unknown judge name. Use 'rough' or 'sample'.")
+
 
 # ----------------------------- Fitness / Objective wrappers -----------------------------
 def simulate_fitness(problem_id: int,
@@ -524,7 +572,11 @@ def build_problem_times_fn(problem_id: int,
 
 
 if __name__ == "__main__":
-    # Example usage with warm start & auto-save
+    # Example usage:
+    # 1) Choose judge (uncomment one)
+    # select_judge("rough")            # 角度解析法
+    # select_judge("sample", K=48)     # 采样法
+    select_judge("rough", K=48)
     problem_id = 2
     encoder, obj = build_problem_objective(problem_id, dt=0.01, aggregate="sum")
     times_fn = build_problem_times_fn(problem_id, dt=0.01)

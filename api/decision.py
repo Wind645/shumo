@@ -3,11 +3,35 @@ from typing import Dict, List, Tuple, Iterable, Optional, Union
 import numpy as np
 from simcore import (
     Missile, Drone, Cylinder, Simulator, OcclusionEvaluator,
-    C_BASE_DEFAULT, R_CYL_DEFAULT, H_CYL_DEFAULT,
-    SMOKE_DESCENT_DEFAULT, SMOKE_LIFETIME_DEFAULT, SMOKE_RADIUS_DEFAULT,
-    MISSILES_POS0, MISSILE_SPEED, DRONES_POS0, DRONE_SPEED_MIN, DRONE_SPEED_MAX, MIN_BOMB_INTERVAL,
-    FAKE_TARGET_ORIGIN,
 )
+
+# ---- Inlined baseline constants (was simcore.constants) ----
+SMOKE_RADIUS_DEFAULT = 10.0
+SMOKE_LIFETIME_DEFAULT = 20.0
+SMOKE_DESCENT_DEFAULT = 3.0
+C_BASE_DEFAULT = np.array([0.0,200.0,0.0], dtype=np.float32)
+R_CYL_DEFAULT = 7.0
+H_CYL_DEFAULT = 10.0
+MISSILE_SPEED = 300.0
+MISSILES_POS0 = {
+    "M1": np.array([20000.0,      0.0, 2000.0], dtype=np.float32),
+    "M2": np.array([19000.0,    600.0, 2100.0], dtype=np.float32),
+    "M3": np.array([18000.0,   -600.0, 1900.0], dtype=np.float32),
+}
+DRONES_POS0 = {
+    "FY1": np.array([17800.0,     0.0, 1800.0], dtype=np.float32),
+    "FY2": np.array([12000.0,  1400.0, 1400.0], dtype=np.float32),
+    "FY3": np.array([ 6000.0, -3000.0,  700.0], dtype=np.float32),
+    "FY4": np.array([11000.0,  2000.0, 1800.0], dtype=np.float32),
+    "FY5": np.array([13000.0, -2000.0, 1300.0], dtype=np.float32),
+}
+DRONE_SPEED_MIN = 70.0
+DRONE_SPEED_MAX = 140.0
+MIN_BOMB_INTERVAL = 1.0
+# 允许通过切换该开关来关闭最小投弹间隔强制检查。
+# True: 若间隔不足会 raise ValueError (原逻辑)；False: 直接放行（由上层优化器自行惩罚或过滤）。
+ENFORCE_MIN_BOMB_INTERVAL = False
+FAKE_TARGET_ORIGIN = np.array([0.0,0.0,0.0], dtype=np.float32)
 
 Vec3 = np.ndarray
 FAKE_TARGET = FAKE_TARGET_ORIGIN.astype(float)
@@ -29,6 +53,9 @@ def azimuth_to_dir(azim_rad: float) -> Vec3:
 
 def _validate_bombs(bombs: List[Dict]):
     times = sorted(float(b["deploy_time"]) for b in bombs)
+    if not ENFORCE_MIN_BOMB_INTERVAL:
+        # 不做硬性限制，直接返回；上层可自行在目标函数中加入惩罚
+        return
     for i in range(1, len(times)):
         if times[i] - times[i-1] < MIN_BOMB_INTERVAL - 1e-9:
             raise ValueError(f"同一无人机投弹间隔不足{MIN_BOMB_INTERVAL}秒: {times[i-1]} -> {times[i]}")
@@ -52,7 +79,7 @@ def build_drones_and_schedules(decision: Dict) -> Tuple[List[Drone], List[Tuple[
             dir_vec = _norm(target_h - pos0)
         else:
             raise ValueError("必须提供 direction 或 azimuth 或 aim_fake_target 之一作为航向")
-        drones.append(Drone(pos0=pos0, direction=dir_vec, speed=v))
+        drones.append(Drone(id=di+1, direction=dir_vec, speed=v, strategy=[]))
         bombs = d.get("bombs", [])
         _validate_bombs(bombs)
         for b in bombs:
@@ -73,7 +100,7 @@ def _build_missiles(which: Union[str, List[str]]) -> Dict[str, Missile]:
     res: Dict[str, Missile] = {}
     for k in keys:
         spec = MISSILES_DEF[k]
-        res[k] = Missile(pos0=spec["pos0"], speed=spec["speed"], target=spec["target"])
+        res[k] = Missile(id=int(k[1]), target=spec["target"], speed=spec["speed"])
     return res
 
 def _max_flight_time(missiles: Dict[str, Missile]) -> float:

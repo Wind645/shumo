@@ -14,16 +14,15 @@ import numpy as np
 
 from api.objectives import objective_q2_vector
 from api.problems import evaluate_problem2
-from vectorized_judge import vectorized_circle_fully_occluded_by_sphere
-from simcore.constants import (
-    C_BASE_DEFAULT as _C_BASE,
-    R_CYL_DEFAULT as _R_CYL,
-    H_CYL_DEFAULT as _H_CYL,
-    SMOKE_LIFETIME_DEFAULT as _SMOKE_LIFE,
-    SMOKE_DESCENT_DEFAULT as _SMOKE_DESCENT,
-    SMOKE_RADIUS_DEFAULT as _SMOKE_RADIUS,
-)
-from simcore.constants import G as _G
+from judges.vectorized_judge import vectorized_circle_fully_occluded_by_sphere
+# Inlined constants
+_C_BASE = np.array([0.0,200.0,0.0], dtype=np.float64)
+_R_CYL = 7.0
+_H_CYL = 10.0
+_SMOKE_LIFE = 20.0
+_SMOKE_DESCENT = 3.0
+_SMOKE_RADIUS = 10.0
+_G = 9.81
 
 # Missile spec (copied from api/decision.MISSILES_DEF['M1'])
 _MISSILE_POS0 = np.array([20000.0, 0.0, 2000.0], dtype=np.float64)

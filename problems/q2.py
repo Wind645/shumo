@@ -7,7 +7,6 @@ from pathlib import Path
 from optimizer.algorithms import solve_sa, solve_ga, solve_pso
 from optimizer.spec import decode_vector
 from api.problems import evaluate_problem2
-from simcore.constants import DRONES_POS0
 
 # ================= 可编辑区：算法/参数选择 =================
 ALGO = 'sa'              # 'sa' | 'ga' | 'pso' | 'hybrid'

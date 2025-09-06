@@ -3,7 +3,11 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict
 import numpy as np
 
-from .constants import SMOKE_DESCENT_DEFAULT, SMOKE_LIFETIME_DEFAULT, SMOKE_RADIUS_DEFAULT
+# Inlined constants (simcore.constants removed)
+SMOKE_RADIUS_DEFAULT = 10.0
+SMOKE_LIFETIME_DEFAULT = 20.0
+SMOKE_DESCENT_DEFAULT = 3.0
+
 from .entities import Missile, Drone, Bomb, SmokeCloud, Cylinder
 from .occlusion import OcclusionEvaluator
 

@@ -1,4 +1,4 @@
-"""Torch-accelerated version of `vectorized_judge`.
+"""Torch-accelerated versfrom judges.vectorized_judge import _vectorized_poly_real_roots_desc as _np_roots_batchon of `vectorized_judge`.
 
 This module mirrors the semantics of `vectorized_judge.py` but performs the
 bulk of arithmetic in PyTorch so it can leverage GPU acceleration. The only
@@ -23,7 +23,7 @@ import torch
 import numpy as np
 
 # Reuse the reliable NumPy root finder from existing module
-from vectorized_judge import _vectorized_poly_real_roots_desc as _np_roots_batch
+from .vectorized_judge import _vectorized_poly_real_roots_desc as _np_roots_batch
 
 # ---------------------------------------------------------------------------
 # Optional: GPU batch quartic real root extraction via companion matrix eigen

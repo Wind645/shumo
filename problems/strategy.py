@@ -60,15 +60,18 @@ def load_strategy(path: str | Path) -> Dict[str, Any]:
             'speed': spec['speed'],
         }
         if not drone_entry['pos0']:
-            # use constants defaults for known names
-            try:
-                from simcore.constants import DRONES_POS0
-                if name in DRONES_POS0:
-                    drone_entry['pos0'] = DRONES_POS0[name].tolist()
-                else:
-                    raise KeyError
-            except Exception:
-                raise ValueError(f'{name} 未提供 pos0 且无法从常量推断')
+            # 内联默认初始坐标 (constants.py 已移除)
+            _DRONES_POS0 = {
+                "FY1": [17800.0, 0.0, 1800.0],
+                "FY2": [12000.0, 1400.0, 1400.0],
+                "FY3": [ 6000.0,-3000.0, 700.0],
+                "FY4": [11000.0, 2000.0, 1800.0],
+                "FY5": [13000.0,-2000.0, 1300.0],
+            }
+            if name in _DRONES_POS0:
+                drone_entry['pos0'] = _DRONES_POS0[name]
+            else:
+                raise ValueError(f'{name} 未提供 pos0 且无法推断默认位置')
         # heading specification priority: direction > azimuth > aim_fake_target
         if 'direction' in spec:
             drone_entry['direction'] = spec['direction']

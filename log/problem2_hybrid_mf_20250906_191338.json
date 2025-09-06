@@ -1,0 +1,34 @@
+{
+  "problem": 2,
+  "algo": "hybrid_mf",
+  "occlusion_method": "rough_caps",
+  "dt": 0.02,
+  "best_x": [
+    140.0,
+    0.0,
+    0.0,
+    0.2
+  ],
+  "decoded": [
+    {
+      "pos0": [
+        17800.0,
+        0.0,
+        1800.0
+      ],
+      "speed": 140.0,
+      "azimuth": 0.0,
+      "bombs": [
+        {
+          "deploy_time": 0.0,
+          "explode_delay": 0.2
+        }
+      ]
+    }
+  ],
+  "occluded_time": {
+    "M1": 2.7799999999999847
+  },
+  "total": 2.7799999999999847,
+  "elapsed_sec": 11.942108869552612
+}

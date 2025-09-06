@@ -16,7 +16,18 @@ Return helpers ensure bombs within min interval (1s). If violation -> invalid fl
 """
 from math import pi
 from typing import List, Tuple, Dict, Any
-from simcore.constants import DRONES_POS0, MIN_BOMB_INTERVAL, DRONE_SPEED_MIN, DRONE_SPEED_MAX
+# Inlined defaults (constants module removed)
+import numpy as _np
+DRONES_POS0 = {
+    "FY1": _np.array([17800.0, 0.0, 1800.0], dtype=_np.float32),
+    "FY2": _np.array([12000.0, 1400.0, 1400.0], dtype=_np.float32),
+    "FY3": _np.array([ 6000.0,-3000.0,  700.0], dtype=_np.float32),
+    "FY4": _np.array([11000.0, 2000.0, 1800.0], dtype=_np.float32),
+    "FY5": _np.array([13000.0,-2000.0, 1300.0], dtype=_np.float32),
+}
+MIN_BOMB_INTERVAL = 1.0
+DRONE_SPEED_MIN = 70.0
+DRONE_SPEED_MAX = 140.0
 
 DeployBound = (0.0, 60.0)
 DelayBound = (0.2, 12.0)

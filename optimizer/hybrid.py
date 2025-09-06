@@ -3,15 +3,14 @@ from __future__ import annotations
 import os, math, random, numpy as np, torch
 from dataclasses import dataclass
 from typing import Optional, Dict
-from simcore.constants import (
-    SMOKE_LIFETIME_DEFAULT as _SMOKE_LIFE,
-    SMOKE_DESCENT_DEFAULT as _SMOKE_DESCENT,
-    SMOKE_RADIUS_DEFAULT as _SMOKE_RADIUS,
-    R_CYL_DEFAULT as _R_CYL,
-    H_CYL_DEFAULT as _H_CYL,
-    C_BASE_DEFAULT as _C_BASE,
-    G as _G,
-)
+# Inlined constants
+_SMOKE_LIFE = 20.0
+_SMOKE_DESCENT = 3.0
+_SMOKE_RADIUS = 10.0
+_R_CYL = 7.0
+_H_CYL = 10.0
+_C_BASE = torch.tensor([0.0,200.0,0.0])
+_G = 9.81
 from api.problems import evaluate_problem2
 from optimizer.ga_q2 import solve_q2_ga, BOUNDS_DEFAULT, _batch_occluded_time_numpy as _ga_batch_occluded_time_numpy
 
@@ -159,19 +158,19 @@ def solve_q2_hybrid(*, sa_iters=20000, sa_neighbor_batch=1024, sa_step_scale=0.2
         _eval_backend = lambda P: _vectorized_occluded_time(P, dt, dev)
     elif judge_backend == 'vectorized_torch':
         try:
-            from vectorized_judge_torch import batch_occluded_time_caps_torch as _batch_caps_torch
+            from judges.vectorized_judge_torch import batch_occluded_time_caps_torch as _batch_caps_torch
         except ImportError as e:
             raise ImportError("需要 vectorized_judge_torch 模块") from e
         _eval_backend = lambda P: _batch_caps_torch(P, dt=dt, device=dev)
     elif judge_backend == 'vectorized_torch_newton':
         try:
-            from vectorized_judge_torch import batch_occluded_time_caps_torch_newton as _batch_caps_newton
+            from judges.vectorized_judge_torch import batch_occluded_time_caps_torch_newton as _batch_caps_newton
         except ImportError as e:
             raise ImportError("需要 vectorized_judge_torch 模块 (newton)") from e
         _eval_backend = lambda P: _batch_caps_newton(P, dt=dt, device=dev)
     elif judge_backend == 'vectorized_torch_sampled':
         try:
-            from vectorized_judge_torch_sampled import batch_occluded_time_caps_torch_sampled as _batch_caps_sampled
+            from judges.vectorized_judge_torch_sampled import batch_occluded_time_caps_torch_sampled as _batch_caps_sampled
         except ImportError as e:
             raise ImportError("需要 vectorized_judge_torch_sampled 模块 (采样版本)") from e
         _eval_backend = lambda P: _batch_caps_sampled(P, dt=dt, device=dev)

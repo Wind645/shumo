@@ -5,12 +5,71 @@ from __future__ import annotations
 """
 import time
 import random
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 import numpy as np
 
-from baolijiefa import CylinderOcclusionJudge
+# from baolijiefa import CylinderOcclusionJudge  # removed
 from utils import circle_fmin_cos, circle_fully_occluded_by_sphere
+
+# Inlined functions from removed baolijiefa module
+def _segment_intersects_sphere(V: np.ndarray, P: np.ndarray, S: np.ndarray, R: float) -> bool:
+    """线段 VP 与球(S,R) 是否相交 (存在 t∈[0,1] 使得 |V + t(P-V) - S| <= R)。"""
+    V = np.asarray(V, dtype=np.float64)
+    P = np.asarray(P, dtype=np.float64)
+    S = np.asarray(S, dtype=np.float64)
+    d = P - V
+    a = float(np.dot(d, d))
+    if a == 0.0:  # 退化为点
+        return float(np.dot(V - S, V - S)) <= R * R + 1e-12
+    b = 2.0 * float(np.dot(d, V - S))
+    c = float(np.dot(V - S, V - S) - R * R)
+    disc = b * b - 4.0 * a * c
+    if disc < 0.0:
+        return False
+    sqrt_disc = disc ** 0.5
+    t1 = (-b - sqrt_disc) / (2.0 * a)
+    t2 = (-b + sqrt_disc) / (2.0 * a)
+    return (0.0 <= t1 <= 1.0) or (0.0 <= t2 <= 1.0)
+
+def _sample_cylinder_points(C_base: np.ndarray, r: float, h: float, *,
+                            n_theta: int, n_h: int, n_cap_radial: int, check_caps: bool) -> np.ndarray:
+    """生成圆柱(含端面)采样点集合 (N,3)。
+
+    侧面: n_theta * (n_h+1)
+    端面: 若启用, 两端各 n_theta * (n_cap_radial-1) + 1 (中心)
+    """
+    C_base = np.asarray(C_base, dtype=np.float64)
+    x0, y0, z0 = C_base
+    z1 = z0 + h
+    thetas = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)
+    zs = np.linspace(z0, z1, n_h + 1)
+    pts: List[Tuple[float,float,float]] = []
+    for z in zs:
+        cos_t = np.cos(thetas)
+        sin_t = np.sin(thetas)
+        xs = x0 + r * cos_t
+        ys = y0 + r * sin_t
+        for x, y in zip(xs, ys):
+            pts.append((x, y, z))
+    if check_caps:
+        if n_cap_radial <= 1:
+            radii = [0.0]
+        else:
+            # 与原实现一致: sqrt(i/(n-1)) 生成近似均匀面积环
+            radii = [0.0] + [r * (i / (n_cap_radial - 1)) ** 0.5 for i in range(1, n_cap_radial)]
+        for z_cap in (z0, z1):
+            for rr in radii:
+                if rr == 0.0:
+                    pts.append((x0, y0, z_cap))
+                else:
+                    cos_t = np.cos(thetas)
+                    sin_t = np.sin(thetas)
+                    xs = x0 + rr * cos_t
+                    ys = y0 + rr * sin_t
+                    for x, y in zip(xs, ys):
+                        pts.append((x, y, z_cap))
+    return np.asarray(pts, dtype=np.float64)
 
 # 目标圆柱参数（默认与 compare.py 保持一致）
 C_BASE = np.array([0.0, 200.0, 0.0], dtype=float)
@@ -114,21 +173,22 @@ def sampling_cylinder_with_margin(
     n_theta: int, n_h: int, n_cap_radial: int, check_caps: bool
 ) -> Dict:
     """
-    调用采样判定器，同时计算“采样裕量”：min_P (R - d_min(VP,S))。
+    调用采样判定器，同时计算"采样裕量"：min_P (R - d_min(VP,S))。
     """
-    judge = CylinderOcclusionJudge(
-        V=V, S=S, R=R, C_base=C_base, r_cyl=r_cyl, h_cyl=h_cyl,
-        n_theta=n_theta, n_h=n_h, n_cap_radial=n_cap_radial, check_caps=check_caps
-    )
-    res = judge.is_fully_occluded()
+    # Inline the occlusion check
+    pts = _sample_cylinder_points(C_base, r_cyl, h_cyl, n_theta=n_theta, n_h=n_h, n_cap_radial=n_cap_radial, check_caps=check_caps)
+    total_points = len(pts)
+    blocked_points = 0
+    uncovered_indices = []
+    for i, P in enumerate(pts):
+        if _segment_intersects_sphere(V, P, S, R):
+            blocked_points += 1
+        else:
+            uncovered_indices.append(i)
+    
+    ok = blocked_points == total_points
 
-    # 重用其采样点以获得一致的“最小裕量”
-    try:
-        pts = judge._sample_cylinder_points()  # 直接调用其内部采样，确保一致
-    except Exception:
-        # 退化兜底：调用一次 is_fully_occluded() 后再尝试
-        pts = judge._sample_cylinder_points()
-
+    # Calculate min margin
     best_margin = float("+inf")
     best_idx = -1
     best_t = None
@@ -142,10 +202,10 @@ def sampling_cylinder_with_margin(
             best_t = t
 
     return dict(
-        ok=bool(res.occluded),
-        total_points=int(res.total_points),
-        blocked_points=int(res.blocked_points),
-        uncovered_indices=list(res.uncovered_indices),
+        ok=bool(ok),
+        total_points=int(total_points),
+        blocked_points=int(blocked_points),
+        uncovered_indices=list(uncovered_indices),
         min_margin=float(best_margin),
         worst_point_index=int(best_idx),
         worst_t=float(best_t) if best_t is not None else None

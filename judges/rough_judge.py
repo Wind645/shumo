@@ -23,8 +23,8 @@ from typing import Optional, Dict, Tuple
 
 import numpy as np
 
-from judge import OcclusionResult  # 复用结果数据结构
-from vectorized_judge import VectorizedOcclusionResult  # 复用批量结果结构
+from .judge import OcclusionResult  # 复用结果数据结构
+from .vectorized_judge import VectorizedOcclusionResult  # 复用批量结果结构
 
 _TOL = 1e-12
 

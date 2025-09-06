@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple, Iterable, Optional
 import numpy as np
 from .decision import simulate_with_decision
 from simcore.vectorized_pack import package_timeline_single_missile, occluded_time_vectorized_sampling
-from simcore import Missile, Drone, C_BASE_DEFAULT, R_CYL_DEFAULT, H_CYL_DEFAULT, SMOKE_RADIUS_DEFAULT, SMOKE_LIFETIME_DEFAULT, SMOKE_DESCENT_DEFAULT
+from simcore import Missile, Drone  # constants inlined elsewhere
 from .decision import _build_missiles, build_drones_and_schedules
 
 def _simulate_any(decision, which: str, dt: float, occlusion_method: str):

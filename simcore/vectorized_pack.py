@@ -32,11 +32,17 @@ from dataclasses import dataclass
 from typing import List, Tuple, Dict, Iterable
 import numpy as np
 
-from .constants import (
-    VECTORIZED_CAPS_SAMPLE_K, G, SMOKE_DESCENT_DEFAULT, SMOKE_LIFETIME_DEFAULT, SMOKE_RADIUS_DEFAULT,
-    C_BASE_DEFAULT, H_CYL_DEFAULT, R_CYL_DEFAULT,
-)
 from .entities import SmokeCloud, Bomb, Drone, Missile, Cylinder
+
+# ---- Inlined baseline parameters (previously from constants.py) ----
+G = 9.81
+SMOKE_RADIUS_DEFAULT = 10.0
+SMOKE_LIFETIME_DEFAULT = 20.0
+SMOKE_DESCENT_DEFAULT = 3.0
+C_BASE_DEFAULT = np.array([0.0, 200.0, 0.0], dtype=np.float32)
+R_CYL_DEFAULT = 7.0
+H_CYL_DEFAULT = 10.0
+VECTORIZED_CAPS_SAMPLE_K = 48
 
 Vec3 = np.ndarray
 

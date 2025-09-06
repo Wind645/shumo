@@ -1,12 +1,12 @@
-from typing_extensions import Dict
-from turtledemo.clock import dtfont
+# from itertools import count  # removed unused import
 from abc import abstractmethod
 import numpy as np
-from typing import List
-from posix import DirEntry
+from typing import List, cast
+from rough import occluded as rough_occluded
 
-Vec3 = np.ndarray
+Vec3 = np.ndarray # or None
 G = 9.81
+batch_calc_set = []
 
 # ======== ALL OBJECTS ========
 
@@ -14,27 +14,29 @@ class Object:
     all_objects = []
 
     def __init__(self, pos: Vec3 = np.zeros(3)):
-        self.pos = pos
+        # 强制转成 float，避免后续 += 浮点位移时触发 int -> float 的 UFuncOutputCastingError
+        self.pos = np.array(pos, dtype=float)
         Object.all_objects.append(self)
 
     @abstractmethod
     def update(self, dt):
         pass
 
+    def remove(self):
+        Object.all_objects.remove(self)
+
 class Drone(Object):
     def __init__(self, id : int, direction : Vec3, speed : float, strategy: List):
-        if id == 1:
-            super().__init__(np.array([17800, 0, 1800]))
-        elif id == 2:
-            super().__init__(np.array([12000, 1400, 1400]))
-        elif id == 3:
-            super().__init__(np.array([6000, -3000, 700]))
-        elif id == 4:
-            super().__init__(np.array([11000, 2000, 1800]))
-        else: # id = 5
-            super().__init__(np.array([13000, -2000, 1300]))
+        poses = {
+            1: np.array([17800, 0, 1800]),
+            2: np.array([12000, 1400, 1400]),
+            3: np.array([6000, -3000, 700]),
+            4: np.array([11000, 2000, 1800]),
+            5: np.array([13000, -2000, 1300])
+        }
+        super().__init__(poses[id])
 
-        self.direction = direction # remember to make sure norm = 1 and z = 0
+        self.direction = np.array(direction, dtype=float)  # ensure float dtype; remember to make sure norm = 1 and z = 0
         self.speed = speed
         self.age = 0
         self.strategy = strategy
@@ -59,207 +61,160 @@ class Missile(Object):
             super().__init__(np.array([18000, -600, 1900]))
 
         self.velocity = self.pos / np.linalg.norm(self.pos) * 300
+        self.occluded_time: float = 0.0
 
     def update(self, dt):
         self.pos += self.velocity * dt
 
+        if self.pos[2] <= 0:
+            self.remove()
+
 class Smoke(Object):
     def __init__(self, pos: Vec3):
         super().__init__(pos)
-        self.radius = 10
         self.age = 0
 
     def update(self, dt):
         self.pos += np.array([0, 0, -3]) * dt
         self.age += dt
         if self.age >= 20:
-            if self in Object.all_objects:
-                Object.all_objects.remove(self)
+            self.remove()
+        if batch_calc_set:
+            batch_calc_set.append((self.age, self.pos, ))
 
 class Bomb(Object):
     def __init__(self, pos: Vec3, timing : float, init_velocity : Vec3):
         super().__init__(pos)
         self.timing = timing
-        self.velocity = init_velocity
+        self.velocity = np.array(init_velocity, dtype=float)
 
     def update(self, dt):
         self.pos += self.velocity * dt
         self.velocity += np.array([0, 0, -G]) * dt
         if self.pos[2] <= 0:
-            if self in Object.all_objects:
-                Object.all_objects.remove(self)
+            self.remove()
             return
         self.timing -= dt
         if self.timing <= 0:
             Smoke(self.pos.copy()) # already added to Object.all in __init__
-            if self in Object.all_objects:
-                Object.all_objects.remove(self)
+            self.remove()
+
 
 class Simulator:
-    def __init__(self, problem_id : int, dt = 0.01):
+    def __init__(self, problem_id : int, dt = 0.01, strategy=None):
         self.time = 0
         self.dt = dt
+        self.end = False
+
+        if problem_id == 1:
+            Drone(1, np.array([1, 0, 0], dtype=float), 120.0, [[1.5, 3.6]])
+            Missile(1)
+        elif problem_id == 2:
+            if strategy is None:
+                raise ValueError("strategy must be provided when problem_id == 2")
+            direction, speed, st = strategy
+            Drone(1, direction, speed, st)
+            Missile(1)
+        elif problem_id == 3:
+            if strategy is None:
+                raise ValueError("strategy must be provided when problem_id == 3")
+            direction, speed, st = strategy # strategy 需要有三个烟雾弹
+            Drone(1, direction, speed, st)
+            Missile(1)
+        elif problem_id == 4:
+            if strategy is None:
+                raise ValueError("strategy must be provided when problem_id == 4")
+            [(direction1, speed1, st1), (direction2, speed2, st2), (direction3, speed3, st3)] = strategy
+            Drone(1, direction1, speed1, st1)
+            Drone(2, direction2, speed2, st2)
+            Drone(3, direction3, speed3, st3)
+            Missile(1)
+        else:
+            if strategy is None:
+                raise ValueError("strategy must be provided when problem_id == 5")
+            [(direction1, speed1, st1), (direction2, speed2, st2), (direction3, speed3, st3), (direction4, speed4, st4), (direction5, speed5, st5)] = strategy
+            Drone(1, direction1, speed1, st1)
+            Drone(2, direction2, speed2, st2)
+            Drone(3, direction3, speed3, st3)
+            Drone(4, direction4, speed4, st4)
+            Drone(5, direction5, speed5, st5)
+            Missile(1)
+            Missile(2)
+            Missile(3)
+
+        # Cache missile list (assumed fixed count after init)
+        self.missiles = [o for o in Object.all_objects if isinstance(o, Missile)]
+
+        # Trajectory accumulation for batch occlusion:
+        # _missile_traj: list[ list[Vec3] ] length T, inner length = M
+        # _smoke_traj:   list[ list[Vec3] ] length T, inner length variable
+        self._missile_traj = []
+        self._smoke_traj = []
+        self._max_smokes = 0  # track padding size for batch tensor
 
     def update(self):
         self.time += self.dt
         # Iterate over a static copy to allow safe removal inside updates
+        count_missles = 0
         for each in list(Object.all_objects):
             each.update(self.dt)
+            if isinstance(each, Missile):
+                count_missles += 1
+        # Snapshot positions for later batch occlusion computation
+        smokes = [o for o in Object.all_objects if isinstance(o, Smoke)]
+        # missiles list fixed -> use self.missiles
+        self._missile_traj.append([np.array(cast(np.ndarray, m.pos), dtype=float) for m in self.missiles])  # type: ignore
+        self._smoke_traj.append([np.array(cast(np.ndarray, s.pos), dtype=float) for s in smokes])  # type: ignore
+        if len(smokes) > self._max_smokes:
+            self._max_smokes = len(smokes)
+        if count_missles == 0:
+            print("No missiles left")
+            self.end = True
 
-        # if problem_id == 1:
-        #     direction = np.array([ 0.99486373, -0.01117824,  0.1006042 ])
-        #     Drone(1, direction, 120, [[1.5, 3.6]])
-        # elif problem_id == 2:
+    def compute_batch_occlusions(self):
+        """
+        一次性批量计算所有帧的导弹被烟雾遮挡总时长。
+        使用 rough.occluded 在一个大张量上做一次广播，而不是逐帧调用。
+        调用时机：在外部模拟主循环结束后调用。
+        返回：list[float] 每个导弹的累计遮挡时长(秒)。
+        """
+        if not self.missiles:
+            return []
+        T = len(self._missile_traj)
+        if T == 0:
+            return [0.0] * len(self.missiles)
+        M = len(self.missiles)
+        Smax = self._max_smokes
+        missile_arr = np.asarray(self._missile_traj, dtype=float)  # (T,M,3)
+        if Smax == 0:
+            # 没有烟雾
+            for m in self.missiles:
+                m.occluded_time = 0.0
+            return [0.0] * M
 
+        smoke_arr = np.zeros((T, Smax, 3), dtype=float)
+        active_mask = np.zeros((T, Smax), dtype=bool)
+        for t, smokes in enumerate(self._smoke_traj):
+            for j, pos in enumerate(smokes):
+                smoke_arr[t, j] = pos
+                active_mask[t, j] = True
 
-# =========================
-# === APPENDED EXTENSIONS (Non-intrusive) FOR PROBLEM 1 ANALYSIS ===
-# =========================
-# The original code above is preserved verbatim. Below are helper utilities to
-# run Problem 1 scenario and compute the effective遮蔽 (obscuration) time
-# between missile M1 and the real target using the generated smoke cloud.
+        # Batch occlusion: (T,M,1,3) vs (T,1,Smax,3)
+        occ = rough_occluded(missile_arr[:, :, None, :], smoke_arr[:, None, :, :])  # (T,M,Smax)
+        occ &= active_mask[:, None, :]  # mask out padded smokes
+        occ_any = occ.any(axis=2)  # (T,M)
+        occluded_time = occ_any.sum(axis=0) * self.dt
+        for m, tval in zip(self.missiles, occluded_time):
+            m.occluded_time = float(tval)
+        return [float(x) for x in occluded_time]
 
-def reset_objects():
-    """
-    Clear all existing simulation objects so a new scenario can be cleanly executed.
-    """
-    Object.all_objects.clear()
-
-def norm(v: np.ndarray) -> float:
-    return float(np.linalg.norm(v))
-
-def unit(v: np.ndarray) -> np.ndarray:
-    n = norm(v)
-    if n == 0:
-        raise ValueError("Cannot normalize zero-length vector.")
-    return v / n
-
-def distance_point_segment(p: np.ndarray, a: np.ndarray, b: np.ndarray):
-    """
-    Returns the minimal distance from point p to segment a-b and the projection parameter s in [0,1].
-    """
-    ab = b - a
-    ab_len2 = np.dot(ab, ab)
-    if ab_len2 == 0:
-        return norm(p - a), 0.0, a
-    s = np.dot(p - a, ab) / ab_len2
-    s_clamped = max(0.0, min(1.0, s))
-    closest = a + ab * s_clamped
-    return norm(p - closest), s_clamped, closest
-
-def setup_problem1(drone_speed: float = 120.0):
-    """
-    Create objects for Problem 1 as specified:
-    - Drone FY1 at (17800, 0, 1800), heading horizontally toward fake target (origin projected horizontally).
-    - Missile M1.
-    - Drone releases bomb at t=1.5 s with a fuse time 3.6 s (explosion at 5.1 s).
-    """
-    reset_objects()
-    # Horizontal direction: keep altitude (z=0 component in direction)
-    direction = np.array([-1.0, 0.0, 0.0])  # purely toward negative x, constant altitude
-    Drone(1, direction, drone_speed, [[1.5, 3.6]])
-    Missile(1)
-
-def get_objects_by_type(cls):
-    return [o for o in Object.all_objects if isinstance(o, cls)]
-
-def compute_problem1_effective_time(
-    dt: float = 0.01,
-    max_time: float = 26.0,
-    target_center: np.ndarray = np.array([0.0, 200.0, 5.0]),
-    smoke_radius: float = 10.0
-):
-    """
-    Run the simulation loop for Problem 1 and compute the effective遮蔽 time.
-
-    Obscuration criterion:
-      The smoke sphere (center S, radius R) intersects the line-of-sight segment between
-      missile M and target T (point chosen at center height). We check geometric intersection:
-      distance from S to segment M-T <= R.
-
-    Returns a dictionary with:
-      effective_time: total accumulated time of LOS obstruction
-      explosion_time: expected explosion time (5.1)
-      sample_count: number of simulation steps
-      explosion_position: bomb position at explosion moment
-      dt: time step used
-    """
-    # Known scheduled explosion time
-    explosion_time = 1.5 + 3.6  # 5.1 s
-    simulator = Simulator(problem_id=1, dt=dt)
-
-    # To capture explosion position, we monitor when a Smoke is created
-    captured_explosion_pos = None
-    effective_time = 0.0
-    steps = 0
-
-    # Run until either max_time or smoke fully disappeared
-    while simulator.time <= max_time:
-        simulator.update()
-        steps += 1
-
-        # Capture explosion position (first smoke)
-        smokes = get_objects_by_type(Smoke)
-        if captured_explosion_pos is None and smokes:
-            # The first Smoke object center at creation is explosion point
-            captured_explosion_pos = smokes[0].pos.copy()
-
-        # Need missile and smoke for obscuration
-        missiles = get_objects_by_type(Missile)
-        if not missiles:
-            break
-        missile = missiles[0]
-        if not smokes:
-            continue  # no smoke yet or expired
-
-        smoke = smokes[0]
-
-        # Line segment M -> target_center
-        dist, s, _ = distance_point_segment(smoke.pos, missile.pos, target_center)
-        if dist <= smoke_radius and 0.0 <= s <= 1.0:
-            effective_time += dt
-
-        # Optional early exit: after smoke lifetime expected end (explosion_time + 20s)
-        if simulator.time > explosion_time + 20.2:  # slight buffer
-            break
-
-    return {
-        "effective_time": effective_time,
-        "explosion_time": explosion_time,
-        "sample_count": steps,
-        "explosion_position": captured_explosion_pos,
-        "dt": dt
-    }
-
-def run_problem1(dt: float = 0.01):
-    """
-    High-level convenience function:
-      1. Sets up scenario
-      2. Runs simulation and computes effective遮蔽 time
-      3. Returns result dict
-    """
-    setup_problem1()
-    result = compute_problem1_effective_time(dt=dt)
-    return result
-
-def format_problem1_report(result: dict) -> str:
-    exp_pos = result.get("explosion_position", None)
-    if exp_pos is not None:
-        pos_str = f"({exp_pos[0]:.3f}, {exp_pos[1]:.3f}, {exp_pos[2]:.3f})"
-    else:
-        pos_str = "N/A"
-    return (
-        "Problem 1 Simulation Report\n"
-        "---------------------------\n"
-        f"Time step (dt): {result['dt']}\n"
-        f"Samples: {result['sample_count']}\n"
-        f"Explosion time (s): {result['explosion_time']:.3f}\n"
-        f"Explosion position: {pos_str}\n"
-        f"Effective LOS遮蔽 time (s): {result['effective_time']:.6f}\n"
-        f"Fraction of theoretical max (20 s): {result['effective_time']/20.0*100:.3f}%\n"
-    )
-
-# Allow module to be run directly for a quick Problem 1 check without altering original logic
 if __name__ == "__main__":
-    res = run_problem1(dt=0.005)  # moderate resolution
-    print(format_problem1_report(res))
+    # 简单测试：运行第一题场景，结束后批量计算遮挡时间
+    sim = Simulator(problem_id=1, dt=0.01)
+    max_time = 300.0  # 安全上限
+    while not sim.end and sim.time < max_time:
+        sim.update()
+    occluded_times = sim.compute_batch_occlusions()
+    print("Occluded times per missile (s):", occluded_times)
+    for idx, m in enumerate(sim.missiles):
+        print(f"Missile {idx} final position={m.pos}, occluded_time={m.occluded_time:.3f}s")

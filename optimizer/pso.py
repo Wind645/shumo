@@ -1,11 +1,11 @@
 # Particle Swarm Optimization framework with parallel simulation evaluation + JSON model initialization & persistence.
 from __future__ import annotations
 
-import math
+# import math removed (unused after refactor)
 import random
 import time
 from dataclasses import dataclass
-from typing import Callable, Iterable, List, Sequence, Tuple, Optional, Union, Any, Dict
+from typing import Callable, List, Sequence, Tuple, Optional, Union, Any, Dict
 import numpy as np
 import multiprocessing as mp
 import functools
@@ -92,104 +92,27 @@ The PSO below is maximization by default (higher fitness better).
 """
 
 # ----------------------------- Utility functions -----------------------------
-def sigmoid(x: float) -> float:
-    return 1.0 / (1.0 + math.exp(-x))
+# sigmoid imported from encoders.sigmoid
 
-def positive(x: float) -> float:
-    return math.log1p(math.exp(x))  # softplus
+# positive imported from encoders.positive
 
-def clamp(v: float, lo: float, hi: float) -> float:
-    return lo if v < lo else hi if v > hi else v
+# clamp imported from encoders.clamp
 
 
-# ----------------------------- Strategy encoders -----------------------------
-class StrategyEncoder:
-    dim: int
-
-    def encode(self, position: Sequence[float]):
-        raise NotImplementedError
-
-    def initial_position(self) -> np.ndarray:
-        return np.random.uniform(-1, 1, self.dim)
-
-
-class Problem2Encoder(StrategyEncoder):
-    dim = 4
-
-    def encode(self, position: Sequence[float]):
-        angle, speed_raw, release_raw, fuse_raw = position
-        dir_vec = np.array([math.cos(angle), math.sin(angle), 0.0])
-        speed = 70.0 + sigmoid(speed_raw)*70.0
-        release_time = positive(release_raw)
-        fuse = clamp(positive(fuse_raw), 0.1, 15.0)
-        return (dir_vec, float(speed), [[float(release_time), float(fuse)]])
-
-
-class Problem3Encoder(StrategyEncoder):
-    dim = 8
-
-    def encode(self, position: Sequence[float]):
-        angle, speed_raw, r1_raw, f1_raw, gap2_raw, f2_raw, gap3_raw, f3_raw = position
-        dir_vec = np.array([math.cos(angle), math.sin(angle), 0.0])
-        speed = 70.0 + sigmoid(speed_raw)*70.0
-        t1 = positive(r1_raw)
-        t2 = t1 + 1.0 + positive(gap2_raw)
-        t3 = t2 + 1.0 + positive(gap3_raw)
-        bombs = [
-            [float(t1), clamp(positive(f1_raw), 0.1, 15.0)],
-            [float(t2), clamp(positive(f2_raw), 0.1, 15.0)],
-            [float(t3), clamp(positive(f3_raw), 0.1, 15.0)],
-        ]
-        return (dir_vec, float(speed), bombs)
-
-
-class Problem4Encoder(StrategyEncoder):
-    dim = 12
-
-    def encode(self, position: Sequence[float]):
-        chunks = [position[i:i+4] for i in range(0, 12, 4)]
-        encoder = Problem2Encoder()
-        drones = [encoder.encode(c) for c in chunks]
-        return tuple(drones)  # type: ignore
-
-
-class Problem5Encoder(StrategyEncoder):
-    dim = 55
-
-    def encode_single(self, vec: Sequence[float]):
-        angle, speed_raw, act1, r1_raw, f1_raw, act2, gap2_raw, f2_raw, act3, gap3_raw, f3_raw = vec
-        dir_vec = np.array([math.cos(angle), math.sin(angle), 0.0])
-        speed = 70.0 + sigmoid(speed_raw)*70.0
-        a1 = sigmoid(act1)
-        a2 = sigmoid(act2)
-        a3 = sigmoid(act3)
-        bombs = []
-        if a1 > 0.5:
-            t1 = positive(r1_raw)
-            bombs.append([float(t1), clamp(positive(f1_raw), 0.1, 15.0)])
-            base_t = t1
-        else:
-            base_t = 0.0
-        if a2 > 0.5:
-            t2 = base_t + 1.0 + positive(gap2_raw)
-            bombs.append([float(t2), clamp(positive(f2_raw), 0.1, 15.0)])
-            base_t = t2
-        if a3 > 0.5:
-            t3 = base_t + 1.0 + positive(gap3_raw)
-            bombs.append([float(t3), clamp(positive(f3_raw), 0.1, 15.0)])
-        return (dir_vec, float(speed), bombs)
-
-    def encode(self, position: Sequence[float]):
-        drones = [self.encode_single(position[i:i+11]) for i in range(0, self.dim, 11)]
-        return tuple(drones)  # type: ignore
-
-
-ENCODERS = {
-    2: Problem2Encoder(),
-    3: Problem3Encoder(),
-    4: Problem4Encoder(),
-    5: Problem5Encoder(),
-}
+# ----------------------------- Strategy encoders (moved) -----------------------------
+# Refactored: encoder classes have been moved to encoders.py.
+# We keep backward compatibility by importing the public mapping and base class.
+from .encoders import (
+    StrategyEncoder,
+    ENCODERS,
+    Problem2Encoder,
+    Problem3Encoder,
+    Problem4Encoder,
+    Problem5Encoder,
+    sigmoid,
+    positive,
+    clamp,
+)
 
 # ----------------------------- Judge selection -----------------------------
 CURRENT_JUDGE = "rough"
@@ -346,7 +269,8 @@ class ParallelPSO:
                  perturb_std: float = 0.1,
                  models_dir: Optional[str] = None,
                  save_on_exit: Optional[str] = None,
-                 include_swarm_on_save: bool = True):
+                 include_swarm_on_save: bool = True,
+                 bounds: Optional[Tuple[Union[Sequence[float], np.ndarray], Union[Sequence[float], np.ndarray]]] = None):
         self.dim = dim
         self.objective = objective
         self.swarm_size = swarm_size
@@ -368,8 +292,24 @@ class ParallelPSO:
         self.save_on_exit = save_on_exit
         self.include_swarm_on_save = include_swarm_on_save
 
+        # Bounds (optional)
+        if bounds is not None:
+            lo = np.asarray(bounds[0], dtype=float)
+            hi = np.asarray(bounds[1], dtype=float)
+            if lo.shape != (dim,) or hi.shape != (dim,):
+                raise ValueError("bounds arrays must have shape (dim,)")
+            if np.any(hi <= lo):
+                raise ValueError("All hi bounds must be > lo bounds")
+            self.bounds: Optional[Tuple[np.ndarray, np.ndarray]] = (lo, hi)
+        else:
+            self.bounds = None
+
         # Initialize swarm (random first; may be overwritten by warm start)
-        self.positions = np.random.uniform(-1, 1, (swarm_size, dim))
+        if self.bounds is None:
+            self.positions = np.random.uniform(-1, 1, (swarm_size, dim))
+        else:
+            lo, hi = self.bounds
+            self.positions = lo + (hi - lo) * np.random.rand(swarm_size, dim)
         self.velocities = np.zeros((swarm_size, dim))
         self.personal_best_positions = self.positions.copy()
         if self.maximize:
@@ -476,16 +416,21 @@ class ParallelPSO:
     def _objective_wrapper(self, x: Sequence[float]) -> float:
         return self.objective(x)
 
-    def run(self) -> PSOResult:
+    def run(self, iterations: Optional[int] = None) -> PSOResult:
         start = time.time()
         history: List[float] = []
         eval_count = 0
 
-        for it in range(self.iterations):
+        iter_count = self.iterations if iterations is None else int(iterations)
+        for it in range(iter_count):
             reset_mask = np.random.rand(self.swarm_size) < self.reset_prob
             if reset_mask.any():
-                self.positions[reset_mask] = np.random.uniform(-1, 1,
-                                                                (reset_mask.sum(), self.dim))
+                if self.bounds is None:
+                    self.positions[reset_mask] = np.random.uniform(-1, 1,
+                                                                    (reset_mask.sum(), self.dim))
+                else:
+                    lo, hi = self.bounds
+                    self.positions[reset_mask] = lo + (hi - lo) * np.random.rand(reset_mask.sum(), self.dim)
                 self.velocities[reset_mask] = 0.0
 
             fitness = self._evaluate_batch(self.positions)
@@ -507,9 +452,9 @@ class ParallelPSO:
             history.append(self.global_best_fitness)
             if self.best_times_fn is not None:
                 best_times = self.best_times_fn(self.global_best_position)
-                print(f"[PSO] Iter {it+1}/{self.iterations} best_fitness={self.global_best_fitness:.6f} per_missile={best_times}", flush=True)
+                print(f"[PSO] Iter {it+1}/{iter_count} best_fitness={self.global_best_fitness:.6f} per_missile={best_times}", flush=True)
             else:
-                print(f"[PSO] Iter {it+1}/{self.iterations} best_fitness={self.global_best_fitness:.6f}", flush=True)
+                print(f"[PSO] Iter {it+1}/{iter_count} best_fitness={self.global_best_fitness:.6f}", flush=True)
 
             r1 = np.random.rand(self.swarm_size, self.dim)
             r2 = np.random.rand(self.swarm_size, self.dim)
@@ -520,6 +465,9 @@ class ParallelPSO:
                 vmin, vmax = self.velocity_clamp
                 np.clip(self.velocities, vmin, vmax, out=self.velocities)
             self.positions += self.velocities
+            if self.bounds is not None:
+                lo, hi = self.bounds
+                np.clip(self.positions, lo, hi, out=self.positions)
 
         elapsed = time.time() - start
         result = PSOResult(
@@ -535,6 +483,15 @@ class ParallelPSO:
             except Exception as e:
                 print(f"[PSO] Auto-save failed: {e}", flush=True)
         return result
+
+
+# ----------------- Block-based PSO moved -----------------
+# Optional re-export: if unavailable, expose None placeholders.
+try:
+    from .block_pso import BlockPSO, BlockPSOResult  # type: ignore
+except Exception:  # pragma: no cover
+    BlockPSO = None  # type: ignore
+    BlockPSOResult = None  # type: ignore
 
 
 def _objective_dispatch(vec: Sequence[float],
@@ -572,30 +529,6 @@ def build_problem_times_fn(problem_id: int,
 
 
 if __name__ == "__main__":
-    # Example usage:
-    # 1) Choose judge (uncomment one)
-    # select_judge("rough")            # 角度解析法
-    # select_judge("sample", K=48)     # 采样法
-    select_judge("rough", K=48)
-    problem_id = 2
-    encoder, obj = build_problem_objective(problem_id, dt=0.01, aggregate="sum")
-    times_fn = build_problem_times_fn(problem_id, dt=0.01)
-    pso = ParallelPSO(dim=encoder.dim,
-                      objective=obj,
-                      swarm_size=100,
-                      iterations=50,
-                      reset_prob=0.05,
-                      velocity_clamp=(-0.5, 0.5),
-                      processes=4,
-                      seed=42,
-                      best_times_fn=times_fn,
-                      init_model="problem2_latest",   # optional warm start
-                      perturb_std=0.15,
-                      save_on_exit="problem2_latest",
-                      include_swarm_on_save=True)
-    result = pso.run()
-    print("Best fitness:", result.best_fitness)
-    print("Best position vector:", result.best_position)
-    strategy = encoder.encode(list(result.best_position))
-    print("Decoded strategy:", strategy)
-    print("History length:", len(result.history))
+    # Example usage moved to optimize.py (see optimizer/optimize.py for a runnable demo using
+    # both ParallelPSO and BlockPSO).
+    pass

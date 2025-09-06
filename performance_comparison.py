@@ -15,7 +15,7 @@ import sys
 # 也可在命令行运行: uv run performance_comparison.py --no-sampling
 # ---------------------------------------------------------------------------
 SKIP_SAMPLING = True
-CASENUM = 5000
+CASENUM = 20000
 
 
 def sampling_method(V, C, r, S, R, n_samples=1000):

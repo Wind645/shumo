@@ -40,14 +40,14 @@ from optimizer_api import evaluate_problem2
 CONFIG = dict(
     # 基础仿真 / 目标
     method="judge_caps",          # 遮蔽判定方法: 'judge_caps' (快, 保守) 或 'sampling' (慢, 精细)
-    dt=0.05,                       # 仿真时间步 (s) 适中:0.05  精细:0.02  粗略:0.1
+    dt=0.01,                       # 仿真时间步 (s) 适中:0.05  精细:0.02  粗略:0.1
     rel_max=66.0,                  # 投放时间搜索上界 (s)
     delay_max=20.0,                # 起爆延迟搜索上界 (s)
 
     # 初始随机解与退火主控
     t0=1.2,                        # 初始温度 (越大越容易接受差解)
     t_end=1e-3,                    # 终止温度阈值
-    alpha=0.998,                   # 每轮降温因子 (越接近1 降温越慢)
+    alpha=0.988,                   # 每轮降温因子 (越接近1 降温越慢)
     steps_per_t=60,                # 每个温度水平的 Metropolis 迭代次数
     max_steps=25000,               # 总步数上限 (主控迭代预算)
     seed=42,                       # 随机种子 (改为 None 使用系统随机)
@@ -93,7 +93,7 @@ T0_DEFAULT = 1.0        # 初始温度 (对单位=秒的 occlusion_time, 一般 
 T_END_DEFAULT = 1e-3
 ALPHA_DEFAULT = 0.985   # 降温因子
 STEPS_PER_T_DEFAULT = 50
-NO_IMPROVE_STOP = 200000  # 早停: 若超此步无提升
+NO_IMPROVE_STOP = 2000  # 早停: 若超此步无提升
 
 # ---------------- 高级扰动 / 退火策略辅助 ----------------
 

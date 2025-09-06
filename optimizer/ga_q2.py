@@ -30,7 +30,7 @@ Bounds (same as PSO/SA):
 Returned best_eval is produced via canonical simulator for consistency.
 """
 from dataclasses import dataclass
-from typing import Optional, Tuple, Iterable, Dict
+from typing import Optional, Tuple, Iterable, Dict, Callable
 import math
 import random
 import numpy as np
@@ -154,6 +154,124 @@ def _batch_occluded_time_numpy(params: np.ndarray, *, dt: float) -> np.ndarray:
         if oc_both.any():
             occluded_time[idx[oc_both]] += dt
     return occluded_time
+
+
+def _batch_occluded_time_fast(params: np.ndarray, *, dt: float) -> np.ndarray:
+    """Faster (approximate) occluded time computation using simple angular test.
+
+    This mirrors the logic used in the fused Torch SA implementation (hybrid_sa_ga_q2)
+    and avoids the expensive quartic root solving in `vectorized_judge`.
+
+    It is NOT a perfect replacement for the exact cap occlusion judge, but for GA
+    evolutionary pressure it is usually sufficient and several times faster.
+
+    params: (N,4) speed, azimuth, release_time, explode_delay
+    Returns: (N,) occluded_time seconds.
+    """
+    if params.size == 0:
+        return np.zeros(0, dtype=np.float64)
+    p = params.astype(np.float64)
+    speed, az, t_rel, dly = p[:, 0], p[:, 1], p[:, 2], p[:, 3]
+    N = p.shape[0]
+    valid = (speed >= 70.0) & (speed <= 140.0) & (t_rel >= 0.0) & (dly > 0.0)
+    out = np.zeros(N, dtype=np.float64)
+    if not valid.any():
+        return out
+
+    # Constants
+    T_f = float(_MISSILE_T_FLIGHT)
+    n_steps = int(T_f / dt) + 1
+    t_grid = np.linspace(0.0, T_f, n_steps, dtype=np.float64)
+    missile_pos = _MISSILE_POS0[np.newaxis, :] + _MISSILE_DIR[np.newaxis, :] * (_MISSILE_SPEED * t_grid)[:, np.newaxis]
+
+    drone_pos0 = np.array([17800.0, 0.0, 1800.0], dtype=np.float64)
+    drone_pos0_batch = np.tile(drone_pos0, (N, 1))
+    drone_dir = np.column_stack([np.cos(az), np.sin(az), np.zeros_like(az)])
+    a_vec = np.array([0.0, 0.0, -_G], dtype=np.float64)
+
+    rel = drone_pos0_batch + drone_dir * speed[:, None] * t_rel[:, None]
+    vel = drone_dir * speed[:, None]
+    c0 = rel + vel * dly[:, None] + 0.5 * a_vec * (dly[:, None] ** 2)
+    explode = t_rel + dly
+    end = explode + _SMOKE_LIFE
+
+    # Precompute per-candidate start/end step indices to shrink loop work
+    start_idx = np.ceil(explode / dt).astype(int)
+    end_idx = np.floor(end / dt).astype(int)
+    n_steps_total = n_steps
+    start_idx = np.clip(start_idx, 0, n_steps_total - 1)
+    end_idx = np.clip(end_idx, 0, n_steps_total - 1)
+
+    r_cyl = float(_R_CYL)
+    shift = float(_H_CYL)
+    R_smoke = float(_SMOKE_RADIUS)
+    Cb = _C_BASE.astype(np.float64)
+    Ct = np.array([Cb[0], Cb[1], Cb[2] + shift], dtype=np.float64)
+
+    # Loop over *only* time steps that could be active for at least one candidate
+    global_start = start_idx[valid].min()
+    global_end = end_idx[valid].max()
+    for ti in range(global_start, global_end + 1):
+        # Determine which candidates have cloud active at this step
+        act_mask = valid & (ti >= start_idx) & (ti <= end_idx)
+        if not act_mask.any():
+            # If no currently active and all future candidates ended -> break early
+            if ti > end_idx[valid].max():
+                break
+            continue
+        idx = np.nonzero(act_mask)[0]
+        t_now = t_grid[ti]
+        V = missile_pos[ti]  # (3,)
+
+        # Cloud centers at time t (only z descends)
+        tau = np.maximum(0.0, t_now - explode[idx])
+        center_t = c0[idx].copy()
+        center_t[:, 2] = c0[idx][:, 2] - _SMOKE_DESCENT * tau
+
+        # --- Bottom cap (z plane = Cb.z) ---
+        SCb = center_t - V  # (k,3)
+        CCb = Cb - V
+        # Broadcast CCb
+        CCb = np.tile(CCb, (len(idx), 1))
+        dSb = np.linalg.norm(SCb, axis=1)
+        dCb = np.linalg.norm(CCb, axis=1)
+        ratio_s = np.clip(R_smoke / (dSb + 1e-9), 0.0, 1.0)
+        ratio_c = np.clip(r_cyl / (dCb + 1e-9), 0.0, 1.0)
+        uS = SCb / (dSb[:, None] + 1e-9)
+        uC = CCb / (dCb[:, None] + 1e-9)
+        cosg = np.sum(uS * uC, axis=1)
+        cosg = np.clip(cosg, -1.0, 1.0)
+        g = np.arccos(cosg)
+        b = np.arcsin(ratio_c)
+        apha = np.arcsin(ratio_s)
+        oc_b = (g + b) <= (apha + 1e-6)
+
+        # --- Top cap --- (shift coordinates by +shift in z for cylinder top)
+        Vt_z_shift = V.copy()
+        Vt_z_shift[2] -= shift
+        Ct_flat = np.array([Ct[0], Ct[1], 0.0], dtype=np.float64)
+        SCt = center_t.copy()
+        SCt[:, 2] -= shift
+        SCt -= Vt_z_shift
+        CCt = Ct_flat - Vt_z_shift
+        CCt = np.tile(CCt, (len(idx), 1))
+        dSt = np.linalg.norm(SCt, axis=1)
+        dCt = np.linalg.norm(CCt, axis=1)
+        ratio_s2 = np.clip(R_smoke / (dSt + 1e-9), 0.0, 1.0)
+        ratio_c2 = np.clip(r_cyl / (dCt + 1e-9), 0.0, 1.0)
+        uS2 = SCt / (dSt[:, None] + 1e-9)
+        uC2 = CCt / (dCt[:, None] + 1e-9)
+        cosg2 = np.sum(uS2 * uC2, axis=1)
+        cosg2 = np.clip(cosg2, -1.0, 1.0)
+        g2 = np.arccos(cosg2)
+        b2 = np.arcsin(ratio_c2)
+        apha2 = np.arcsin(ratio_s2)
+        oc_t = (g2 + b2) <= (apha2 + 1e-6)
+
+        full = oc_b & oc_t
+        if full.any():
+            out[idx[full]] += dt
+    return out
 
 
 BOUNDS_DEFAULT: Tuple[Tuple[float, float], ...] = (
@@ -280,6 +398,11 @@ def solve_q2_ga(
     bounds: Tuple[Tuple[float, float], ...] = BOUNDS_DEFAULT,
     use_vectorized: bool = True,
     verbose: bool = False,
+    initial_population: Optional[np.ndarray] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+    use_fast_caps: bool = True,
+    judge_backend: Optional[str] = None,
+    device: Optional[str] = None,
 ) -> GAResult:
     """Genetic Algorithm for Q2 with vectorized batch evaluation.
 
@@ -312,23 +435,70 @@ def solve_q2_ga(
     def eval_single(x: Iterable[float]) -> float:
         return float(objective_q2_vector(x, method=method, dt=dt))
 
+    # Device for torch backends (lazy selection only if needed)
+    torch_device = None
+    if judge_backend is not None and judge_backend.startswith('vectorized_torch'):
+        import torch
+        torch_device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
+
     def eval_batch(pop: np.ndarray) -> np.ndarray:
-        if use_vectorized and method == "judge_caps":
-            occluded_time = _batch_occluded_time_numpy(pop, dt=dt)
+        # Unified backend selection
+        if method == "judge_caps" and (judge_backend is not None or use_vectorized):
+            backend = judge_backend
+            if backend is None:
+                # Backward compatibility path: replicate old flags
+                backend = 'rough' if use_fast_caps else 'vectorized'
+            if backend in ('rough', 'fast', 'fast_caps'):
+                occluded_time = _batch_occluded_time_fast(pop, dt=dt)
+            elif backend in ('vectorized', 'numpy'):
+                occluded_time = _batch_occluded_time_numpy(pop, dt=dt)
+            elif backend == 'vectorized_torch':
+                import torch
+                from vectorized_judge_torch import batch_occluded_time_caps_torch as _caps_torch
+                tens = torch.from_numpy(pop).to(torch_device)
+                occluded_time = _caps_torch(tens, dt=dt, device=torch_device).detach().cpu().numpy()
+            elif backend == 'vectorized_torch_newton':
+                import torch
+                from vectorized_judge_torch import batch_occluded_time_caps_torch_newton as _caps_newton
+                tens = torch.from_numpy(pop).to(torch_device)
+                occluded_time = _caps_newton(tens, dt=dt, device=torch_device).detach().cpu().numpy()
+            elif backend == 'vectorized_torch_sampled':
+                import torch
+                from vectorized_judge_torch_sampled import batch_occluded_time_caps_torch_sampled as _caps_sampled
+                tens = torch.from_numpy(pop).to(torch_device)
+                occluded_time = _caps_sampled(tens, dt=dt, device=torch_device).detach().cpu().numpy()
+            else:
+                raise ValueError(f"未知 GA judge_backend={backend}")
             return -occluded_time.astype(np.float64)
+        # Fallback single evaluation path
         vals = [eval_single(pop[i]) for i in range(pop.shape[0])]
         return np.array(vals, dtype=np.float64)
 
     # Initialize population
-    population = lo + np.random.random((pop_size, dim)) * (hi - lo)
+    if initial_population is not None:
+        initial_population = np.asarray(initial_population, dtype=np.float64)
+        if initial_population.ndim != 2 or initial_population.shape[1] != dim:
+            raise ValueError("initial_population shape must be (N,4)")
+        # Clip to bounds just in case
+        initial_population = np.clip(initial_population, lo, hi)
+        population = initial_population.copy()
+        pop_size = population.shape[0]
+    else:
+        population = lo + np.random.random((pop_size, dim)) * (hi - lo)
     fitness = eval_batch(population)
     
     best_idx = np.argmin(fitness)
     best_x = population[best_idx].copy()
     best_fitness = fitness[best_idx]
 
-    if verbose:
-        print(f"Generation 0: Best fitness = {best_fitness:.6f}")
+    def _log(msg: str):
+        if log_fn is not None:
+            log_fn(msg)
+        elif verbose:
+            print(msg)
+
+    if verbose or log_fn is not None:
+        _log(f"Generation 0: Best fitness = {best_fitness:.6f} (fast_caps={use_fast_caps})")
 
     for gen in range(n_generations):
         # Selection
@@ -367,8 +537,8 @@ def solve_q2_ga(
             best_fitness = fitness[0]
             best_x = population[0].copy()
         
-        if verbose and (gen % max(1, n_generations // 10) == 0 or gen == n_generations - 1):
-            print(f"Generation {gen + 1}: Best fitness = {best_fitness:.6f}")
+        if (verbose or log_fn is not None) and (gen % max(1, n_generations // 10) == 0 or gen == n_generations - 1):
+            _log(f"Generation {gen + 1}: Best fitness = {best_fitness:.6f}")
 
     # Final evaluation with canonical simulator
     try:

@@ -16,6 +16,12 @@ import math, random, numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Callable, Iterable, Optional
 from optimizer.spec import bounds_for_problem, decode_vector
+try:
+    import torch  # type: ignore
+    _TORCH_AVAILABLE = True
+except Exception:  # pragma: no cover
+    torch = None
+    _TORCH_AVAILABLE = False
 from api import problems
 from api.problems import evaluate_problem2, evaluate_problem3, evaluate_problem4, evaluate_problem5
 from vectorized_judge import vectorized_circle_fully_occluded_by_sphere
@@ -108,6 +114,74 @@ def _batch_occluded_time_q2_judge_caps(params: np.ndarray, *, dt: float) -> np.n
             out[idx[full]] += dt
     return out
 
+# --------------------- (可选) torch fused batch for Q2 ---------------------
+TORCH_Q2_FUSED: bool = False  # 由 router 赋值 True 则尝试使用 GPU (或 CPU torch) 加速 Q2 judge_caps / rough_caps
+
+def _batch_occluded_time_q2_torch(params: np.ndarray, *, dt: float) -> np.ndarray:
+    if (not _TORCH_AVAILABLE) or params.size == 0:
+        return np.zeros(params.shape[0], dtype=np.float64)
+    import math as _m
+    p = torch.as_tensor(params, dtype=torch.float32)
+    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    p = p.to(dev)
+    speed, az, t_rel, dly = p[:,0], p[:,1], p[:,2], p[:,3]
+    N = p.shape[0]
+    valid = (speed>=70)&(speed<=140)&(t_rel>=0)&(dly>0)
+    out = torch.zeros(N, device=dev)
+    if not valid.any():
+        return out.cpu().numpy().astype(float)
+    missile_pos0 = torch.tensor([20000.0,0.0,2000.0], device=dev)
+    missile_target = torch.tensor([0.0,0.0,0.0], device=dev)
+    d = missile_target - missile_pos0
+    n = torch.linalg.norm(d)
+    miss_dir = d / n
+    miss_speed = 300.0
+    T_f = float(n / miss_speed)
+    n_steps = int(T_f/dt)+1
+    t_grid = torch.linspace(0.0, T_f, n_steps, device=dev)
+    missile_pos = missile_pos0.unsqueeze(0) + miss_dir.unsqueeze(0)*(miss_speed*t_grid).unsqueeze(1)
+    drone0 = torch.tensor([17800.0,0.0,1800.0], device=dev).view(1,3).repeat(N,1)
+    ddir = torch.stack([torch.cos(az), torch.sin(az), torch.zeros_like(az)],1)
+    a = torch.tensor([0.0,0.0,-_G], device=dev)
+    rel = drone0 + ddir*speed.unsqueeze(1)*t_rel.unsqueeze(1)
+    vel = ddir*speed.unsqueeze(1)
+    c0 = rel + vel*dly.unsqueeze(1) + 0.5*a*(dly.unsqueeze(1)**2)
+    explode = t_rel + dly
+    end = explode + _SMOKE_LIFE
+    t_row = t_grid.unsqueeze(0)
+    active = valid.unsqueeze(1) & (t_row>=explode.unsqueeze(1)) & (t_row<=end.unsqueeze(1))
+    if not active.any():
+        return out.cpu().numpy().astype(float)
+    tau = torch.clamp(t_row - explode.unsqueeze(1), min=0)
+    ct = c0.unsqueeze(1).expand(N,n_steps,3).clone()
+    ct[:,:,2] = c0[:,2].unsqueeze(1) - _SMOKE_DESCENT*tau
+    V = missile_pos.unsqueeze(0).expand(N,n_steps,3)
+    Cb = torch.tensor([0.0,200.0,0.0], device=dev)
+    r_cyl = float(_R_CYL); shift = float(_H_CYL); Rsm = float(_SMOKE_RADIUS)
+    # bottom
+    SCb = ct - V; CCb = Cb.view(1,1,3) - V
+    dSb = torch.linalg.norm(SCb, dim=2); dCb = torch.linalg.norm(CCb, dim=2)
+    ratio_s = torch.clamp(Rsm/(dSb+1e-9),0,1); ratio_c = torch.clamp(r_cyl/(dCb+1e-9),0,1)
+    uS = SCb/(dSb.unsqueeze(2)+1e-9); uC = CCb/(dCb.unsqueeze(2)+1e-9)
+    cosg = (uS*uC).sum(2).clamp(-1,1); g = torch.arccos(cosg)
+    b = torch.arcsin(ratio_c); apha = torch.arcsin(ratio_s)
+    oc_b = (g+b) <= (apha+1e-6)
+    # top
+    Vt = V.clone(); Vt[:,:,2]-=shift
+    Ct_flat = torch.tensor([0.0,200.0,shift], device=dev)  # cylinder top center
+    # translate top plane to z=0 technique
+    SCt = ct.clone(); SCt[:,:,2]-=shift; SCt -= Vt
+    CCt = torch.tensor([0.0,200.0,0.0], device=dev).view(1,1,3) - Vt
+    dSt = torch.linalg.norm(SCt, dim=2); dCt = torch.linalg.norm(CCt, dim=2)
+    ratio_s2 = torch.clamp(Rsm/(dSt+1e-9),0,1); ratio_c2 = torch.clamp(r_cyl/(dCt+1e-9),0,1)
+    uS2 = SCt/(dSt.unsqueeze(2)+1e-9); uC2 = CCt/(dCt.unsqueeze(2)+1e-9)
+    cosg2 = (uS2*uC2).sum(2).clamp(-1,1); g2 = torch.arccos(cosg2)
+    b2 = torch.arcsin(ratio_c2); apha2 = torch.arcsin(ratio_s2)
+    oc_t = (g2+b2) <= (apha2+1e-6)
+    full = active & oc_b & oc_t
+    out[valid] = full[valid].sum(1)*dt
+    return out.detach().cpu().numpy().astype(float)
+
 # --------------------- objective wrapper ---------------------
 
 def _scalar_occluded_time(problem: int, x: List[float], bombs_count: int, method: str, dt: float) -> float:
@@ -138,7 +212,10 @@ def _scalar_occluded_time(problem: int, x: List[float], bombs_count: int, method
 # Batch (only prob2 & judge_caps) returns occluded time array
 
 def _batch_eval(problem: int, X: np.ndarray, bombs_count: int, method: str, dt: float) -> np.ndarray:
-    if problem==2 and method=='judge_caps' and X.shape[1]==4:
+    # Q2 向量化: judge_caps 与 rough_caps
+    if problem==2 and method in ('judge_caps','rough_caps') and X.shape[1]==4:
+        if TORCH_Q2_FUSED and _TORCH_AVAILABLE:
+            return _batch_occluded_time_q2_torch(X, dt=dt)
         return _batch_occluded_time_q2_judge_caps(X, dt=dt)
     return np.array([_scalar_occluded_time(problem, X[i].tolist(), bombs_count, method, dt) for i in range(X.shape[0])], dtype=np.float64)
 
@@ -149,7 +226,7 @@ class SAResult:
     best_value: float
     best_eval: Dict
 
-def solve_sa(*, problem: int=2, bombs_count: int=2, iters: int=2000, dt: float=0.02, method: str='judge_caps', neighbor_batch: int=64, step_scale: float=0.2, init_temp: float=2.0, final_temp: float=1e-3, seed: int|None=None, verbose: bool=False) -> SAResult:
+def solve_sa(*, problem: int=2, bombs_count: int=2, iters: int=2000, dt: float=0.02, method: str='judge_caps', neighbor_batch: int=64, step_scale: float=0.2, init_temp: float=2.0, final_temp: float=1e-3, seed: int|None=None, verbose: bool=False, log_interval: int|None=None) -> SAResult:
     if seed is not None: random.seed(seed); np.random.seed(seed)
     bnds = bounds_for_problem(problem, bombs_count)
     lo = np.array([a for (a,_) in bnds]); hi = np.array([b for (_,b) in bnds])
@@ -160,6 +237,8 @@ def solve_sa(*, problem: int=2, bombs_count: int=2, iters: int=2000, dt: float=0
     cur_val = obj_vec(cur.reshape(1,-1))[0]
     best_x = cur.copy(); best_val = float(cur_val)
     sigma = step_scale*span
+    if log_interval is None:
+        log_interval = max(1, iters//20)
     for k in range(iters):
         T = temp(k)
         cand = cur + np.random.randn(neighbor_batch, dim)*sigma
@@ -177,7 +256,7 @@ def solve_sa(*, problem: int=2, bombs_count: int=2, iters: int=2000, dt: float=0
             cur = new_x; cur_val = new_val
             if cur_val < best_val - 1e-15:
                 best_val = float(cur_val); best_x = cur.copy()
-        if verbose and (k % max(1,iters//10)==0 or k==iters-1):
+    if verbose and (k % log_interval==0 or k==iters-1):
             print(f"[SA] {k+1}/{iters} cur={cur_val:.4f} best={best_val:.4f}")
     # authoritative eval
     occ = _scalar_occluded_time(problem, best_x.tolist(), bombs_count, method, dt)

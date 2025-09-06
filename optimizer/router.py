@@ -23,6 +23,16 @@ BACKEND = 'rough'            # (保留占位, 新统一实现暂不区分 backen
 SEED = None
 VERBOSE = True
 
+# ---- SA 额外可调参数（仅 ALGO='sa' 有效） ----
+SA_NEIGHBOR_BATCH = 512      # 每轮候选数量 (越大利用批量越快, GPU/NumPy 更明显)
+SA_STEP_SCALE = 0.25         # 步长 (相对各维边界跨度)
+SA_INIT_TEMP = 2.0           # 初始温度
+SA_FINAL_TEMP = 1e-3         # 终止温度
+SA_LOG_INTERVAL = 50         # 日志间隔 (迭代次数)
+
+# 是否启用 Q2 torch fused (GPU) 加速 (仅问题2 且 method 属于 judge_caps/rough_caps)
+USE_TORCH_Q2 = True
+
 # 算法迭代/代数 (None 使用下面的默认)
 ITERS = None
 GA_GENERATIONS = None
@@ -37,6 +47,12 @@ _DEF_SA_ITERS = 4000
 def run():
     prob = PROBLEM; algo = ALGO
     from optimizer.algorithms import solve_ga, solve_pso, solve_sa
+    # 如启用 torch fused, 设置全局开关
+    try:
+        import optimizer.algorithms as _algs
+        _algs.TORCH_Q2_FUSED = bool(USE_TORCH_Q2)
+    except Exception:
+        pass
     if algo == 'ga':
         res = solve_ga(
             problem=prob,
@@ -64,6 +80,11 @@ def run():
             iters=ITERS or _DEF_SA_ITERS,
             dt=DT,
             method=OCCLUSION_METHOD,
+            neighbor_batch=SA_NEIGHBOR_BATCH,
+            step_scale=SA_STEP_SCALE,
+            init_temp=SA_INIT_TEMP,
+            final_temp=SA_FINAL_TEMP,
+            log_interval=SA_LOG_INTERVAL,
             seed=SEED,
             verbose=VERBOSE,
         ); tag='SA'

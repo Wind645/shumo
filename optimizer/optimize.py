@@ -1,33 +1,24 @@
-"""Constant-based optimization script for PSO and BlockPSO.
+"""Constant-based optimization script for PSO, BlockPSO, and Differential Evolution (DE).
 
-This file replaces the previous argparse-based CLI with a simple
-constant-driven configuration block. Adjust the constants below and run:
-
+Run with:
     python -m optimizer.optimize
 
-Two modes:
+Modes:
   MODE = "parallel"  -> single ParallelPSO run
-  MODE = "block"      -> block-based multi-PSO (regional elimination)
+  MODE = "block"     -> block-based multi-PSO (regional elimination)
+  MODE = "de"        -> Differential Evolution
 
 Configuration sections:
   GLOBAL_*           : judge & shared simulation controls
   PARALLEL_*         : parameters for ParallelPSO
-  BLOCK_*            : parameters for BlockPSO (used only when MODE == "block")
-
-You can version-control multiple variants by copying this file or
-dynamically importing custom configs.
-
-If you want ad‑hoc experimentation without editing the repo you can
-also set environment variables (optional simple overrides implemented
-for a few common parameters) — see ENV OVERRIDES section below.
+  BLOCK_*            : parameters for BlockPSO (only when MODE == "block")
+  DE_*               : parameters for DifferentialEvolution (only when MODE == "de")
 
 Produced outputs:
-  - Console logs each iteration / round.
+  - Console concise logs (per iteration / round / generation).
   - Summary JSON-like dict printed at the end.
-  - Optional model auto-save (ParallelPSO only) or summary save (BlockPSO).
+  - Optional model auto-save (all optimizers); BlockPSO saves summary, DE/PSO save full JSON.
 
-NOTE: BlockPSO requires block_pso.py presence. If missing, MODE="block"
-will raise at runtime.
 """
 from __future__ import annotations
 
@@ -48,12 +39,17 @@ try:
 except Exception:  # pragma: no cover
     BlockPSO = None  # type: ignore
 
+try:
+    from .de import DifferentialEvolution  # type: ignore
+except Exception:  # pragma: no cover
+    DifferentialEvolution = None  # type: ignore
+
 # =============================================================================
 # CONFIGURATION CONSTANTS
 # =============================================================================
 
-# Mode: "parallel" or "block"
-MODE: str = "block"
+# Mode: "parallel" | "block" | "de"
+MODE: str = "de"
 
 # Problem id (2..5)
 PROBLEM_ID: int = 4
@@ -87,14 +83,12 @@ PARALLEL_INERTIA: float = 0.72
 PARALLEL_COGNITIVE: float = 1.49
 PARALLEL_SOCIAL: float = 1.49
 PARALLEL_RESET_PROB: float = 0.05
-PARALLEL_VELOCITY_CLAMP: Optional[tuple[float, float]] = (-0.5, 0.5)  # (vmin, vmax) or None
-PARALLEL_PROCESSES: Optional[int] = None  # None -> auto
+PARALLEL_VELOCITY_CLAMP: Optional[tuple[float, float]] = (-0.5, 0.5)
+PARALLEL_PROCESSES: Optional[int] = None
 PARALLEL_SEED: Optional[int] = 14
-
-# Warm start & persistence
-PARALLEL_INIT_MODEL: Optional[str] = "problem4_latest"  # None for no warm start
+PARALLEL_INIT_MODEL: Optional[str] = "problem4_latest"
 PARALLEL_PERTURB_STD: float = 0.15
-PARALLEL_SAVE_MODEL: Optional[str] = "problem4_latest"  # None to disable save
+PARALLEL_SAVE_MODEL: Optional[str] = "problem4_latest"
 PARALLEL_INCLUDE_SWARM_ON_SAVE: bool = True
 
 # ---------------- Block PSO specific ----------------
@@ -111,12 +105,23 @@ BLOCK_RESET_PROB: float = 0.08
 BLOCK_VELOCITY_CLAMP: Optional[tuple[float, float]] = (-0.4, 0.4)
 BLOCK_PROCESSES: Optional[int] = 4
 BLOCK_SEED: Optional[int] = 2025
-BLOCK_SAVE_MODEL: Optional[str] = "block_problem4_latest"  # Saves summary (best only)
+BLOCK_SAVE_MODEL: Optional[str] = "block_problem4_latest"
+
+# ---------------- Differential Evolution specific ----------------
+DE_GENERATIONS: int = 60
+DE_POPULATION_SIZE: int = 80
+DE_F: float = 0.8
+DE_CR: float = 0.9
+DE_PROCESSES: Optional[int] = None
+DE_SEED: Optional[int] = 123
+DE_INIT_MODEL: Optional[str] = "problem4_de_latest"
+DE_PERTURB_STD: float = 0.15
+DE_SAVE_MODEL: Optional[str] = "problem4_de_latest"
+DE_INCLUDE_POP_ON_SAVE: bool = True
 
 # =============================================================================
-# OPTIONAL ENVIRONMENT OVERRIDES (lightweight) – convenient for quick trials
+# OPTIONAL ENVIRONMENT OVERRIDES
 # =============================================================================
-# Only a subset is supported; extend as needed.
 _ENV_OVERRIDES = {
     "MODE": ("MODE", str),
     "PROBLEM_ID": ("PROBLEM_ID", int),
@@ -124,6 +129,8 @@ _ENV_OVERRIDES = {
     "PARALLEL_SWARM_SIZE": ("PARALLEL_SWARM_SIZE", int),
     "BLOCK_TOTAL_ITERATIONS": ("BLOCK_TOTAL_ITERATIONS", int),
     "BLOCK_BLOCK_ITERATIONS": ("BLOCK_BLOCK_ITERATIONS", int),
+    "DE_GENERATIONS": ("DE_GENERATIONS", int),
+    "DE_POPULATION_SIZE": ("DE_POPULATION_SIZE", int),
 }
 for _k, (env_name, cast) in _ENV_OVERRIDES.items():
     if env_name in os.environ:
@@ -131,10 +138,9 @@ for _k, (env_name, cast) in _ENV_OVERRIDES.items():
             globals()[_k] = cast(os.environ[env_name])  # type: ignore
         except Exception:
             pass
-# Removed deletion of loop variables to avoid static analysis “possibly unbound” warning
 
 # =============================================================================
-# Helper functions
+# Helpers
 # =============================================================================
 def _maybe_weights() -> Optional[List[float]]:
     return GLOBAL_WEIGHTS if GLOBAL_AGGREGATE == "weighted" else None
@@ -151,23 +157,14 @@ def _safe_strategy_to_json(strategy_obj):
         return strategy_obj
     return str(strategy_obj)
 
-
 # =============================================================================
 # Run functions
 # =============================================================================
 def run_parallel() -> Dict[str, Any]:
-    """
-    Execute a standard ParallelPSO run using the global constant configuration.
-    Assumes the judge has already been selected (handled in main()).
-    """
     encoder, objective = build_problem_objective(
-        PROBLEM_ID,
-        dt=GLOBAL_DT,
-        aggregate=GLOBAL_AGGREGATE,
-        weights=_maybe_weights()
+        PROBLEM_ID, dt=GLOBAL_DT, aggregate=GLOBAL_AGGREGATE, weights=_maybe_weights()
     )
     best_times_fn = build_problem_times_fn(PROBLEM_ID, dt=GLOBAL_DT) if GLOBAL_SHOW_TIMES else None
-
     pso = ParallelPSO(
         dim=encoder.dim,
         objective=objective,
@@ -187,22 +184,13 @@ def run_parallel() -> Dict[str, Any]:
         save_on_exit=PARALLEL_SAVE_MODEL,
         include_swarm_on_save=PARALLEL_INCLUDE_SWARM_ON_SAVE,
     )
-
     result = pso.run()
     strategy = encoder.encode(list(result.best_position))
-
     final_times = None
     if GLOBAL_SHOW_TIMES:
-        # If we didn't attach best_times_fn (because show times false initially) compute now.
-        if best_times_fn is not None:
-            final_times = best_times_fn(list(result.best_position))
-        else:
-            final_times = build_problem_times_fn(PROBLEM_ID, dt=GLOBAL_DT)(list(result.best_position))
-
+        final_times = best_times_fn(list(result.best_position)) if best_times_fn else build_problem_times_fn(PROBLEM_ID, dt=GLOBAL_DT)(list(result.best_position))
     if GLOBAL_VERBOSE:
-        print(f"[ParallelPSO] Completed iterations={PARALLEL_ITERATIONS} "
-              f"best_fitness={result.best_fitness:.6f}")
-
+        print(f"[ParallelPSO] Done iters={PARALLEL_ITERATIONS} best={result.best_fitness:.6f}")
     return {
         "mode": "parallel",
         "problem": PROBLEM_ID,
@@ -215,21 +203,12 @@ def run_parallel() -> Dict[str, Any]:
         "times": final_times,
     }
 
-
 def run_block() -> Dict[str, Any]:
-    """
-    Execute a BlockPSO run (multi-region PSO with elimination).
-    """
     if BlockPSO is None:
-        raise RuntimeError("BlockPSO module not available; ensure block_pso.py exists.")
-
+        raise RuntimeError("BlockPSO module not available.")
     encoder, objective = build_problem_objective(
-        PROBLEM_ID,
-        dt=GLOBAL_DT,
-        aggregate=GLOBAL_AGGREGATE,
-        weights=_maybe_weights()
+        PROBLEM_ID, dt=GLOBAL_DT, aggregate=GLOBAL_AGGREGATE, weights=_maybe_weights()
     )
-
     bpso = BlockPSO(
         dim=encoder.dim,
         objective=objective,
@@ -248,15 +227,11 @@ def run_block() -> Dict[str, Any]:
         processes=BLOCK_PROCESSES,
         seed=BLOCK_SEED,
     )
-
     result = bpso.run()
     strategy = encoder.encode(list(result.best_position))
-
     final_times = None
     if GLOBAL_SHOW_TIMES:
         final_times = build_problem_times_fn(PROBLEM_ID, dt=GLOBAL_DT)(list(result.best_position))
-
-    # Optional summary save (best only) if configured
     if BLOCK_SAVE_MODEL:
         models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
         os.makedirs(models_dir, exist_ok=True)
@@ -275,14 +250,11 @@ def run_block() -> Dict[str, Any]:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             if GLOBAL_VERBOSE:
-                print(f"[BlockPSO] Summary saved to {path}")
+                print(f"[BlockPSO] Summary saved {path}")
         except Exception as e:
-            print(f"[BlockPSO] Failed to save summary ({e})")
-
+            print(f"[BlockPSO] Save failed ({e})")
     if GLOBAL_VERBOSE:
-        print(f"[BlockPSO] Completed rounds={len(result.history)} "
-              f"best_fitness={result.best_fitness:.6f}")
-
+        print(f"[BlockPSO] Done rounds={len(result.history)} best={result.best_fitness:.6f}")
     return {
         "mode": "block",
         "problem": PROBLEM_ID,
@@ -296,33 +268,69 @@ def run_block() -> Dict[str, Any]:
         "times": final_times,
     }
 
+def run_de() -> Dict[str, Any]:
+    if DifferentialEvolution is None:
+        raise RuntimeError("DifferentialEvolution module not available.")
+    encoder, objective = build_problem_objective(
+        PROBLEM_ID, dt=GLOBAL_DT, aggregate=GLOBAL_AGGREGATE, weights=_maybe_weights()
+    )
+    best_times_fn = build_problem_times_fn(PROBLEM_ID, dt=GLOBAL_DT) if GLOBAL_SHOW_TIMES else None
+    de = DifferentialEvolution(
+        dim=encoder.dim,
+        objective=objective,
+        population_size=DE_POPULATION_SIZE,
+        generations=DE_GENERATIONS,
+        F=DE_F,
+        CR=DE_CR,
+        maximize=GLOBAL_MAXIMIZE,
+        processes=DE_PROCESSES,
+        seed=DE_SEED,
+        best_times_fn=best_times_fn,
+        init_model=DE_INIT_MODEL,
+        perturb_std=DE_PERTURB_STD,
+        save_on_exit=DE_SAVE_MODEL,
+        include_swarm_on_save=DE_INCLUDE_POP_ON_SAVE,
+    )
+    result = de.run()
+    strategy = encoder.encode(list(result.best_position))
+    final_times = None
+    if GLOBAL_SHOW_TIMES:
+        final_times = best_times_fn(list(result.best_position)) if best_times_fn else build_problem_times_fn(PROBLEM_ID, dt=GLOBAL_DT)(list(result.best_position))
+    if GLOBAL_VERBOSE:
+        print(f"[DE] Done generations={DE_GENERATIONS} best={result.best_fitness:.6f}")
+    return {
+        "mode": "de",
+        "problem": PROBLEM_ID,
+        "best_fitness": float(result.best_fitness),
+        "best_position": result.best_position.tolist(),
+        "history": result.history,
+        "eval_count": int(result.eval_count),
+        "elapsed_sec": float(result.elapsed),
+        "strategy": _safe_strategy_to_json(strategy),
+        "times": final_times,
+    }
 
+# =============================================================================
+# Main
+# =============================================================================
 def main():
-    """
-    Entry point: selects judge, runs chosen mode, prints summary JSON.
-    Modify constants at top of file for different experiments.
-    """
-    # Select judge (only once)
     select_judge(
         GLOBAL_JUDGE,
         K=GLOBAL_JUDGE_SAMPLE_K if GLOBAL_JUDGE == "sample" else 32,
         verbose=GLOBAL_VERBOSE
     )
-
     if MODE == "parallel":
         result = run_parallel()
     elif MODE == "block":
         result = run_block()
+    elif MODE == "de":
+        result = run_de()
     else:
-        raise ValueError(f"Unknown MODE={MODE}. Use 'parallel' or 'block'.")
-
-    # Print compact summary JSON
+        raise ValueError(f"Unknown MODE={MODE}. Use 'parallel' | 'block' | 'de'.")
     summary_keys = ["mode", "problem", "best_fitness", "elapsed_sec"]
     summary = {k: result[k] for k in summary_keys}
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-
     return result
-
 
 if __name__ == "__main__":
     main()

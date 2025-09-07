@@ -189,7 +189,7 @@ def simulate_fitness(problem_id: int,
             release_times = sorted(b[0] for b in bombs)
             for a, b in zip(release_times, release_times[1:]):
                 if (b - a) < 1.0 - 1e-9:
-                    penalty_factor = 0.2
+                    penalty_factor = 0.3
                     break
             if penalty_factor < 1.0:
                 break

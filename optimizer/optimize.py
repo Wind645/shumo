@@ -1,4 +1,5 @@
-"""Constant-based optimization script for PSO, BlockPSO, and Differential Evolution (DE).
+"""Constant-based optimization script for PSO, BlockPSO, Differential Evolution (DE),
+Discrete PSO (DPSO), and Hybrid DE+DPSO.
 
 Run with:
     python -m optimizer.optimize
@@ -7,18 +8,22 @@ Modes:
   MODE = "parallel"  -> single ParallelPSO run
   MODE = "block"     -> block-based multi-PSO (regional elimination)
   MODE = "de"        -> Differential Evolution
+  MODE = "dpso"      -> Discrete PSO over categorical sets
+  MODE = "hybrid"    -> Two-stage DE (continuous) + DPSO (discrete recombination)
 
 Configuration sections:
   GLOBAL_*           : judge & shared simulation controls
   PARALLEL_*         : parameters for ParallelPSO
-  BLOCK_*            : parameters for BlockPSO (only when MODE == "block")
-  DE_*               : parameters for DifferentialEvolution (only when MODE == "de")
+  BLOCK_*            : parameters for BlockPSO
+  DE_*               : parameters for DifferentialEvolution
+  DPSO_*             : parameters for DiscretePSO (MODE == "dpso")
+  HYBRID_*           : parameters for Hybrid (MODE == "hybrid")
 
 Produced outputs:
   - Console concise logs (per iteration / round / generation).
   - Summary JSON-like dict printed at the end.
-  - Optional model auto-save (all optimizers); BlockPSO saves summary, DE/PSO save full JSON.
-
+  - Optional model auto-save (all optimizers except currently hybrid/DPSO which you
+    can extend similarly).
 """
 from __future__ import annotations
 
@@ -44,12 +49,22 @@ try:
 except Exception:  # pragma: no cover
     DifferentialEvolution = None  # type: ignore
 
+try:
+    from .dpso import DiscretePSO  # type: ignore
+except Exception:  # pragma: no cover
+    DiscretePSO = None  # type: ignore
+
+try:
+    from .hybrid import HybridDE_DPSO  # type: ignore
+except Exception:  # pragma: no cover
+    HybridDE_DPSO = None  # type: ignore
+
 # =============================================================================
 # CONFIGURATION CONSTANTS
 # =============================================================================
 
-# Mode: "parallel" | "block" | "de"
-MODE: str = "de"
+# Mode: "parallel" | "block" | "de" | "dpso" | "hybrid"
+MODE: str = "hybrid"
 
 # Problem id (2..5)
 PROBLEM_ID: int = 4
@@ -59,7 +74,7 @@ GLOBAL_JUDGE: str = "rough"
 # Sampling K (only used when GLOBAL_JUDGE == "sample")
 GLOBAL_JUDGE_SAMPLE_K: int = 24
 
-# Simulation dt
+# Simulation dt (used for continuous methods & DPSO objective)
 GLOBAL_DT: float = 0.01
 
 # Objective aggregation: "sum" | "min" | "weighted"
@@ -119,6 +134,37 @@ DE_PERTURB_STD: float = 0.15
 DE_SAVE_MODEL: Optional[str] = "problem4_de_latest"
 DE_INCLUDE_POP_ON_SAVE: bool = True
 
+# ---------------- Discrete PSO (DPSO) specific ----------------
+# DPSO operates on a discretized categorical set taken from a seed sampling procedure.
+# For simplicity here we just sample initial continuous points randomly and discretize.
+DPSO_SAMPLE_POP: int = 256          # number of random continuous samples to derive categories
+DPSO_CATEGORY_CAP: int = 24          # max categories per dimension
+DPSO_MIN_CATEGORIES: int = 6
+DPSO_SWARM_SIZE: int = 160
+DPSO_ITERATIONS: int = 50
+DPSO_INERTIA: float = 0.65
+DPSO_COGNITIVE: float = 1.4
+DPSO_SOCIAL: float = 1.4
+DPSO_RESET_PROB: float = 0.04
+DPSO_NOISE_STD: float = 0.015
+DPSO_TEMPERATURE_DECAY: Optional[float] = None
+DPSO_SEED: Optional[int] = 555
+
+# ---------------- Hybrid (DE + DPSO) specific ----------------
+HYBRID_DE_POPULATION: int = 2048
+HYBRID_DE_GENERATIONS: int = 200
+HYBRID_DE_F: float = 0.8
+HYBRID_DE_CR: float = 0.9
+HYBRID_DT_START: float = 0.10
+HYBRID_DT_END: float = 0.05
+HYBRID_ELITE_FRACTION: float = 0.08
+HYBRID_ELITE_TOP_K: Optional[int] = None
+HYBRID_PER_DIM_CATEGORY_CAP: int = 48
+HYBRID_MIN_CATEGORIES_PER_DIM: int = 6
+HYBRID_DPSO_SWARM_SIZE: int = 200
+HYBRID_DPSO_ITERATIONS: int = 60
+HYBRID_SEED: Optional[int] = 2025
+
 # =============================================================================
 # OPTIONAL ENVIRONMENT OVERRIDES
 # =============================================================================
@@ -131,6 +177,10 @@ _ENV_OVERRIDES = {
     "BLOCK_BLOCK_ITERATIONS": ("BLOCK_BLOCK_ITERATIONS", int),
     "DE_GENERATIONS": ("DE_GENERATIONS", int),
     "DE_POPULATION_SIZE": ("DE_POPULATION_SIZE", int),
+    "DPSO_ITERATIONS": ("DPSO_ITERATIONS", int),
+    "DPSO_SWARM_SIZE": ("DPSO_SWARM_SIZE", int),
+    "HYBRID_DE_GENERATIONS": ("HYBRID_DE_GENERATIONS", int),
+    "HYBRID_DE_POPULATION": ("HYBRID_DE_POPULATION", int),
 }
 for _k, (env_name, cast) in _ENV_OVERRIDES.items():
     if env_name in os.environ:
@@ -310,6 +360,113 @@ def run_de() -> Dict[str, Any]:
         "times": final_times,
     }
 
+def run_dpso() -> Dict[str, Any]:
+    if DiscretePSO is None:
+        raise RuntimeError("DiscretePSO module not available.")
+    # Build categories from random sampling in continuous space
+    encoder, objective = build_problem_objective(
+        PROBLEM_ID, dt=GLOBAL_DT, aggregate=GLOBAL_AGGREGATE, weights=_maybe_weights()
+    )
+    dim = encoder.dim
+    samples = []
+    for _ in range(DPSO_SAMPLE_POP):
+        samples.append(list((2 * (os.urandom(1)[0] / 255.0) - 1.0) for _ in range(dim)))
+    samples_arr = [[row[d] for row in samples] for d in range(dim)]
+    categories: List[List[float]] = []
+    for d in range(dim):
+        uniq = sorted(set(float(v) for v in samples_arr[d]))
+        if len(uniq) > DPSO_CATEGORY_CAP:
+            stride = len(uniq) / DPSO_CATEGORY_CAP
+            reduced = []
+            for k in range(DPSO_CATEGORY_CAP):
+                idx = int(round(k * stride))
+                if idx >= len(uniq):
+                    idx = len(uniq) - 1
+                reduced.append(uniq[idx])
+            uniq = sorted(set(reduced))
+        while len(uniq) < DPSO_MIN_CATEGORIES:
+            uniq.append(0.0)
+            uniq = sorted(set(uniq))
+        categories.append(uniq)
+    def obj(raw_vec: Sequence[float]) -> float:
+        return objective(raw_vec)
+    dpso = DiscretePSO(
+        categories=categories,
+        objective=obj,
+        swarm_size=DPSO_SWARM_SIZE,
+        iterations=DPSO_ITERATIONS,
+        inertia=DPSO_INERTIA,
+        cognitive=DPSO_COGNITIVE,
+        social=DPSO_SOCIAL,
+        reset_prob=DPSO_RESET_PROB,
+        noise_std=DPSO_NOISE_STD,
+        maximize=GLOBAL_MAXIMIZE,
+        processes=None,
+        seed=DPSO_SEED or int(time.time()),
+        pass_indices=False,
+        init_model=None,
+        perturb_prob=0.15,
+        models_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "models"),
+        save_on_exit=None,
+        include_swarm_on_save=False,
+        temperature_decay=DPSO_TEMPERATURE_DECAY,
+    )
+    res = dpso.run()
+    if GLOBAL_SHOW_TIMES:
+        times_fn = build_problem_times_fn(PROBLEM_ID, dt=GLOBAL_DT)
+        times = times_fn(res.best_values)
+    else:
+        times = None
+    return {
+        "mode": "dpso",
+        "problem": PROBLEM_ID,
+        "best_fitness": float(res.best_fitness),
+        "best_indices": res.best_indices.tolist(),
+        "best_values": [float(v) for v in res.best_values],
+        "history": res.history,
+        "eval_count": int(res.eval_count),
+        "elapsed_sec": float(res.elapsed),
+        "times": times,
+    }
+
+def run_hybrid() -> Dict[str, Any]:
+    if HybridDE_DPSO is None:
+        raise RuntimeError("HybridDE_DPSO module not available.")
+    hybrid = HybridDE_DPSO(
+        problem_id=PROBLEM_ID,
+        aggregate=GLOBAL_AGGREGATE,
+        weights=_maybe_weights(),
+        maximize=GLOBAL_MAXIMIZE,
+        judge=GLOBAL_JUDGE,
+        de_population=HYBRID_DE_POPULATION,
+        de_generations=HYBRID_DE_GENERATIONS,
+        de_F=HYBRID_DE_F,
+        de_CR=HYBRID_DE_CR,
+        dt_start=HYBRID_DT_START,
+        dt_end=HYBRID_DT_END,
+        elite_fraction=HYBRID_ELITE_FRACTION,
+        elite_top_k=HYBRID_ELITE_TOP_K,
+        per_dim_category_cap=HYBRID_PER_DIM_CATEGORY_CAP,
+        min_categories_per_dim=HYBRID_MIN_CATEGORIES_PER_DIM,
+        dpso_swarm_size=HYBRID_DPSO_SWARM_SIZE,
+        dpso_iterations=HYBRID_DPSO_ITERATIONS,
+        seed=HYBRID_SEED,
+        show_times=GLOBAL_SHOW_TIMES,
+        verbose=GLOBAL_VERBOSE,
+    )
+    out = hybrid.run()
+    # Flatten final summary keys for uniform summary reporting
+    return {
+        "mode": "hybrid",
+        "problem": PROBLEM_ID,
+        "best_fitness": float(out["final"]["best_fitness"]),
+        "best_position": out["final"]["best_position_continuous"],
+        "elapsed_sec": float(out["total_elapsed_sec"]),
+        "history_de": out["de"]["history"],
+        "history_dpso": out["dpso"]["history"],
+        "times": out["final"]["per_missile_times"],
+    }
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -325,10 +482,14 @@ def main():
         result = run_block()
     elif MODE == "de":
         result = run_de()
+    elif MODE == "dpso":
+        result = run_dpso()
+    elif MODE == "hybrid":
+        result = run_hybrid()
     else:
-        raise ValueError(f"Unknown MODE={MODE}. Use 'parallel' | 'block' | 'de'.")
+        raise ValueError(f"Unknown MODE={MODE}. Use 'parallel' | 'block' | 'de' | 'dpso' | 'hybrid'.")
     summary_keys = ["mode", "problem", "best_fitness", "elapsed_sec"]
-    summary = {k: result[k] for k in summary_keys}
+    summary = {k: result[k] for k in summary_keys if k in result}
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return result
 

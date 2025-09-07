@@ -116,6 +116,21 @@ from .encoders import (
 
 # ----------------------------- Judge selection -----------------------------
 CURRENT_JUDGE = "rough"
+_SAMPLE_JUDGE_FORCED_K: int | None = None  # set via force_sample_K(); when not None overrides any K passed into select_judge
+
+def force_sample_K(K: int, verbose: bool = True):
+    """
+    Force the sampling judge to always use a fixed K (e.g. 8) regardless of later
+    select_judge() calls that might pass a different default (like 32).
+    Call this once early (before optimizers are constructed).
+    """
+    global _SAMPLE_JUDGE_FORCED_K
+    if K <= 0:
+        raise ValueError("K must be positive")
+    _SAMPLE_JUDGE_FORCED_K = int(K)
+    if verbose:
+        print(f"[Judge] Forced sampling K set to {_SAMPLE_JUDGE_FORCED_K}.")
+
 def select_judge(name: str, *, K: int = 32, verbose: bool = True):
     """
     选择遮挡判定函数 (judge)。必须在创建 Simulator / 运行 PSO 前调用。
@@ -152,13 +167,18 @@ def select_judge(name: str, *, K: int = 32, verbose: bool = True):
             print("[Judge] Switched to rough analytic judge.")
     elif name in {"sample", "batch_sample"}:
         from judges.batch_sample import is_cylinder_blocked_vectorized
-        def _wrapped(data, _K=K):
+        eff_K = _SAMPLE_JUDGE_FORCED_K if _SAMPLE_JUDGE_FORCED_K is not None else K
+        def _wrapped(data, _K=eff_K):
+            # _K captured so per-call cost is minimal; eff_K already resolved (robust override)
             return is_cylinder_blocked_vectorized(data, K=_K)
         _wrapped.__name__ = "is_sphere_blocked_vectorized"
         _sim.is_sphere_blocked_vectorized = _wrapped
-        CURRENT_JUDGE = f"sample(K={K})"
+        CURRENT_JUDGE = f"sample(K={eff_K})"
         if verbose:
-           print(f"[Judge] Switched to sampling judge with K={K}.")
+            if _SAMPLE_JUDGE_FORCED_K is not None:
+                print(f"[Judge] Switched to sampling judge with forced K={eff_K}.")
+            else:
+                print(f"[Judge] Switched to sampling judge with K={eff_K}.")
     else:
         raise ValueError("Unknown judge name. Use 'rough' or 'sample'.")
 

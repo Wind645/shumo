@@ -269,7 +269,7 @@ class Simulator:
 
 if __name__ == "__main__":
     # Example: run Q1 and report occlusion
-    sim = Simulator(problem_id=1, dt=0.01)
+    sim = Simulator(problem_id=1, dt=0.0001)
     sim.run_until_end()
     times = sim.compute_batch_occlusions()
     print("Occluded times per missile (s):", times)

@@ -122,7 +122,8 @@ class Problem3Encoder(StrategyEncoder):
     def encode(self, position: Sequence[float]):
         (angle, speed_raw, r1_raw, f1_raw,
          gap2_raw, f2_raw, gap3_raw, f3_raw) = position
-        dir_vec = np.array([math.cos(angle), math.sin(angle), 0.0])
+        theta = angle * 2 * math.pi
+        dir_vec = np.array([math.cos(theta), math.sin(theta), 0.0])
         speed = 70.0 + sigmoid(speed_raw) * 70.0
         t1 = positive(r1_raw)
         t2 = t1 + 1.0 + positive(gap2_raw)
@@ -159,7 +160,8 @@ class Problem5Encoder(StrategyEncoder):
          act1, r1_raw, f1_raw,
          act2, gap2_raw, f2_raw,
          act3, gap3_raw, f3_raw) = vec
-        dir_vec = np.array([math.cos(angle), math.sin(angle), 0.0])
+        theta = angle * 2 * math.pi
+        dir_vec = np.array([math.cos(theta), math.sin(theta), 0.0])
         speed = 70.0 + sigmoid(speed_raw) * 70.0
         a1 = sigmoid(act1)
         a2 = sigmoid(act2)

@@ -1,5 +1,6 @@
 """Constant-based optimization script for PSO, BlockPSO, Differential Evolution (DE),
-Discrete PSO (DPSO), and Hybrid DE+DPSO.
+Discrete PSO (DPSO), Hybrid DE+DPSO, PushPSO (crowding + stagnation repellers),
+and a Reduced mode (Problem 5 reduced-dimensional encoder).
 
 Run with:
     python -m optimizer.optimize
@@ -10,6 +11,8 @@ Modes:
   MODE = "de"        -> Differential Evolution
   MODE = "dpso"      -> Discrete PSO over categorical sets
   MODE = "hybrid"    -> Two-stage DE (continuous) + DPSO (discrete recombination)
+  MODE = "push"      -> PushPSO (crowding + stagnation cluster repellers)
+  MODE = "reduced"   -> Reduced Problem 5 (50-dim) encoder + standard ParallelPSO
 
 Configuration sections:
   GLOBAL_*           : judge & shared simulation controls
@@ -31,6 +34,7 @@ import os
 import json
 import time
 from typing import Any, Dict, List, Sequence, Optional
+import numpy as np
 
 from .pso import (
     ParallelPSO,
@@ -38,6 +42,10 @@ from .pso import (
     build_problem_times_fn,
     select_judge,
 )
+try:
+    from .staged_pso import StagedDimPSO  # type: ignore
+except Exception:  # pragma: no cover
+    StagedDimPSO = None  # type: ignore
 
 try:
     from .block_pso import BlockPSO  # type: ignore
@@ -63,16 +71,18 @@ except Exception:  # pragma: no cover
 # CONFIGURATION CONSTANTS
 # =============================================================================
 
-# Mode: "parallel" | "block" | "de" | "dpso" | "hybrid"
+# Mode: "parallel" | "block" | "de" | "dpso" | "hybrid" | "push" | "reduced" | "staged"
 MODE: str = "hybrid"
 
 # Problem id (2..5)
 PROBLEM_ID: int = 4
+# Unified save/load base name per problem (independent of optimizer method)
+UNIFIED_MODEL_BASENAME: str = f"problem{PROBLEM_ID}_latest"
 
 # Judge: "rough" or "sample"
 GLOBAL_JUDGE: str = "rough"
 # Sampling K (only used when GLOBAL_JUDGE == "sample")
-GLOBAL_JUDGE_SAMPLE_K: int = 24
+GLOBAL_JUDGE_SAMPLE_K: int = 8
 
 # Simulation dt (used for continuous methods & DPSO objective)
 GLOBAL_DT: float = 0.01
@@ -101,10 +111,64 @@ PARALLEL_RESET_PROB: float = 0.05
 PARALLEL_VELOCITY_CLAMP: Optional[tuple[float, float]] = (-0.5, 0.5)
 PARALLEL_PROCESSES: Optional[int] = None
 PARALLEL_SEED: Optional[int] = 14
-PARALLEL_INIT_MODEL: Optional[str] = "problem4_latest"
+PARALLEL_INIT_MODEL: Optional[str] = UNIFIED_MODEL_BASENAME
 PARALLEL_PERTURB_STD: float = 0.15
-PARALLEL_SAVE_MODEL: Optional[str] = "problem4_latest"
+PARALLEL_SAVE_MODEL: Optional[str] = UNIFIED_MODEL_BASENAME
 PARALLEL_INCLUDE_SWARM_ON_SAVE: bool = True
+
+# ---------------- Push PSO specific ----------------
+PUSH_ITERATIONS: int = 2000
+PUSH_SWARM_SIZE: int = 512
+PUSH_INERTIA: float = 0.72
+PUSH_COGNITIVE: float = 1.49
+PUSH_SOCIAL: float = 1.49
+PUSH_RESET_PROB: float = 0.02
+PUSH_VELOCITY_CLAMP: Optional[tuple[float, float]] = (-0.5, 0.5)
+PUSH_PROCESSES: Optional[int] = None
+PUSH_SEED: Optional[int] = 12
+PUSH_CROWD_RADIUS: Optional[float] = None          # set None to use grid mode
+PUSH_DENSITY_THRESHOLD: int = 6
+PUSH_PUSH_STRENGTH: float = 0.8
+PUSH_ADAPTIVE_PUSH: bool = True
+PUSH_STAGNATION_ITERS: int = 3                    # (legacy per-particle stagnation threshold kept for compatibility)
+PUSH_CLUSTER_EPS: float = 0.15
+PUSH_CLUSTER_MIN_SIZE: int = 3
+PUSH_CLUSTER_MAX_SIZE: int = 10
+PUSH_REPELLER_RADIUS: float = 0.6
+PUSH_REPELLER_STRENGTH: float = 1.2
+PUSH_REPELLER_DECAY: float = 0.95
+# ---- New region stagnation (local repeller) controls ----
+PUSH_REGION_STAGNATION_ITERS: int = 20            # increased: require longer local stagnation
+PUSH_REGION_MIN_GROUP: int = 5                    # larger group to form local repeller
+PUSH_REGION_REPELLER_RADIUS_SCALE: float = 1.0    # region_repeller_radius_scale
+# ---- Global stagnation escape controls ----
+PUSH_GLOBAL_STAGNATION_ITERS: int = 50            # allow exploitation before global escape
+PUSH_GLOBAL_STAGNATION_REINIT_FRACTION: float = 0.15
+PUSH_GLOBAL_STAGNATION_REPELLER_STRENGTH_SCALE: float = 1.2
+PUSH_GLOBAL_STAGNATION_REPELLER_RADIUS_SCALE: float = 1.0
+# ---- Repeller population / behavior caps ----
+PUSH_MAX_ACTIVE_REPELLERS: int = 120              # tighter cap to prevent explosion
+PUSH_REPELLER_INVERSE_DISTANCE: bool = False      # toggle inverse-distance extra scaling
+PUSH_SAVE_MODEL: Optional[str] = UNIFIED_MODEL_BASENAME
+PUSH_INCLUDE_SWARM_ON_SAVE: bool = True
+
+# --- Push PSO region stagnation (local repeller) params ---
+# 连续多少轮单粒子未改进视为“区域停滞”候选
+PUSH_REGION_STAGNATION_ITERS: int = 20
+# 形成一个区域 repeller 至少需要的停滞粒子数量
+PUSH_REGION_MIN_GROUP: int = 5
+# 区域分组时使用的半径缩放（相对于 repeller_radius）
+PUSH_REGION_REPELLER_RADIUS_SCALE: float = 1.0
+
+# --- Push PSO global stagnation (whole-swarm escape) params ---
+# 全局最优连续多少轮无改进触发全局逃逸
+PUSH_GLOBAL_STAGNATION_ITERS: int = 50
+# 触发时重新随机初始化的粒子比例
+PUSH_GLOBAL_STAGNATION_REINIT_FRACTION: float = 0.15
+# 触发时在全局最优处放置的强力 repeller 强度倍率 (基于当前 repeller_strength)
+PUSH_GLOBAL_STAGNATION_REPELLER_STRENGTH_MULT: float = 1.2
+# 触发时强力 repeller 半径倍率 (基于当前 repeller_radius)
+PUSH_GLOBAL_STAGNATION_REPELLER_RADIUS_MULT: float = 1.0
 
 # ---------------- Block PSO specific ----------------
 BLOCK_BLOCKS_PER_DIM: int = 2
@@ -120,19 +184,34 @@ BLOCK_RESET_PROB: float = 0.08
 BLOCK_VELOCITY_CLAMP: Optional[tuple[float, float]] = (-0.4, 0.4)
 BLOCK_PROCESSES: Optional[int] = 4
 BLOCK_SEED: Optional[int] = 2025
-BLOCK_SAVE_MODEL: Optional[str] = "block_problem4_latest"
+BLOCK_SAVE_MODEL: Optional[str] = UNIFIED_MODEL_BASENAME
 
 # ---------------- Differential Evolution specific ----------------
-DE_GENERATIONS: int = 60
-DE_POPULATION_SIZE: int = 80
-DE_F: float = 0.8
-DE_CR: float = 0.9
+# Large-pop configuration: larger population improves coverage; tune generations & F accordingly.
+# Population raised (>=2000 as requested). F lowered for stability with large diversity.
+DE_GENERATIONS: int = 120          # more total evaluations with large population
+DE_POPULATION_SIZE: int = 2048     # large population as per requirement (>=2000)
+DE_F: float = 0.6                  # slightly smaller differential weight to reduce overshoot in large pop
+DE_CR: float = 0.9                 # keep crossover rate
 DE_PROCESSES: Optional[int] = None
 DE_SEED: Optional[int] = 123
-DE_INIT_MODEL: Optional[str] = "problem4_de_latest"
-DE_PERTURB_STD: float = 0.15
-DE_SAVE_MODEL: Optional[str] = "problem4_de_latest"
+DE_INIT_MODEL: Optional[str] = UNIFIED_MODEL_BASENAME
+DE_PERTURB_STD: float = 0.12       # slightly lower perturb around best when warm starting large population
+DE_SAVE_MODEL: Optional[str] = UNIFIED_MODEL_BASENAME
 DE_INCLUDE_POP_ON_SAVE: bool = True
+
+# ---------------- StagedDimPSO specific ----------------
+# 维度分批搜索相关配置
+STAGED_MODE_TYPE: str = "overlap"      # 'fixed' | 'shuffle' | 'overlap' | 'sensitivity' | 'custom'
+STAGED_GROUP_SIZE: int = 5             # for shuffle / sensitivity
+STAGED_WINDOW_SIZE: int = 5            # for fixed / overlap
+STAGED_STRIDE: int = 3                 # for overlap (ignored for fixed => stride=window)
+STAGED_ITERATIONS_PER_STAGE: int = 30
+STAGED_SWARM_SIZE: int = 48
+STAGED_REFINE_FULL: bool = True
+STAGED_REFINE_ITERATIONS: int = 60
+STAGED_MAX_STAGES: int | None = None   # limit number of stage groups (None = all)
+STAGED_SEED: int | None = 2025
 
 # ---------------- Discrete PSO (DPSO) specific ----------------
 # DPSO operates on a discretized categorical set taken from a seed sampling procedure.
@@ -150,20 +229,41 @@ DPSO_NOISE_STD: float = 0.015
 DPSO_TEMPERATURE_DECAY: Optional[float] = None
 DPSO_SEED: Optional[int] = 555
 
-# ---------------- Hybrid (DE + DPSO) specific ----------------
-HYBRID_DE_POPULATION: int = 2048
+# ---------------- Hybrid (DE -> Staged -> Push) specific ----------------
+# Stage 1: Differential Evolution (global exploration)
+HYBRID_DE_POPULATION: int = 10000
 HYBRID_DE_GENERATIONS: int = 200
-HYBRID_DE_F: float = 0.8
+HYBRID_DE_F: float = 0.75
 HYBRID_DE_CR: float = 0.9
-HYBRID_DT_START: float = 0.10
+# Optional DE elitism / selection tuning (GA-style)
+HYBRID_DE_ELITE_FRACTION: float = 0.01  # keep top 1% each generation (if supported)
+HYBRID_DE_TOURNAMENT_K: int = 2         # tournament size for selection (if supported)
+# Optional GA stage (if enabled, replaces DE in hybrid Stage 1)
+HYBRID_GA_ENABLE: bool = True
+HYBRID_GA_POPULATION: int = 10000
+HYBRID_GA_GENERATIONS: int = 200
+HYBRID_GA_ELITE_FRACTION: float = 0.01
+HYBRID_GA_TOURNAMENT_K: int = 2
+HYBRID_GA_CROSSOVER_RATE: float = 0.9
+HYBRID_GA_MUTATION_RATE: float = 0.15
+HYBRID_GA_MUTATION_SIGMA_FRAC: float = 0.08
+HYBRID_GA_JITTER_SEED_FRACTION: float = 0.8
+HYBRID_GA_STAGNATION_PATIENCE: int = 10
+# Unified simulation dt for hybrid pipeline
 HYBRID_DT_END: float = 0.05
-HYBRID_ELITE_FRACTION: float = 0.08
-HYBRID_ELITE_TOP_K: Optional[int] = None
-HYBRID_PER_DIM_CATEGORY_CAP: int = 48
-HYBRID_MIN_CATEGORIES_PER_DIM: int = 6
-HYBRID_DPSO_SWARM_SIZE: int = 200
-HYBRID_DPSO_ITERATIONS: int = 60
+# Seed (shared base for sub-stages)
 HYBRID_SEED: Optional[int] = 2025
+# Stage 3 (optional): PushPSO polish (crowding disabled)
+HYBRID_ENABLE_PUSH: bool = True
+HYBRID_PUSH_ITERS: int = 160
+HYBRID_PUSH_SWARM: int = 512
+HYBRID_PUSH_REPELLER_RADIUS: float = 0.6
+HYBRID_PUSH_REPELLER_STRENGTH: float = 1.2
+HYBRID_PUSH_REPELLER_DECAY: float = 0.985
+HYBRID_PUSH_RESET_PROB: float = 0.04
+HYBRID_PUSH_INERTIA: float = 0.72
+HYBRID_PUSH_COG: float = 1.49
+HYBRID_PUSH_SOC: float = 1.49
 
 # =============================================================================
 # OPTIONAL ENVIRONMENT OVERRIDES
@@ -231,7 +331,8 @@ def run_parallel() -> Dict[str, Any]:
         best_times_fn=best_times_fn,
         init_model=PARALLEL_INIT_MODEL,
         perturb_std=PARALLEL_PERTURB_STD,
-        save_on_exit=PARALLEL_SAVE_MODEL,
+        # Disable internal auto-save; we handle unified merge below
+        save_on_exit=None,
         include_swarm_on_save=PARALLEL_INCLUDE_SWARM_ON_SAVE,
     )
     result = pso.run()
@@ -239,6 +340,23 @@ def run_parallel() -> Dict[str, Any]:
     final_times = None
     if GLOBAL_SHOW_TIMES:
         final_times = best_times_fn(list(result.best_position)) if best_times_fn else build_problem_times_fn(PROBLEM_ID, dt=GLOBAL_DT)(list(result.best_position))
+    # Unified per-problem merge
+    section = {
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "dim": encoder.dim,
+        "best_fitness": float(result.best_fitness),
+        "best_position": result.best_position.tolist(),
+        "history": result.history,
+        "strategy": _safe_strategy_to_json(strategy),
+    }
+    if final_times is not None:
+        section["times"] = final_times
+    # Include swarm positions for richer future warm starts
+    try:
+        section["swarm_positions"] = pso.positions.tolist()
+    except Exception:
+        pass
+    merge_optimizer_section(PROBLEM_ID, "parallel", section, maximize=GLOBAL_MAXIMIZE)
     if GLOBAL_VERBOSE:
         print(f"[ParallelPSO] Done iters={PARALLEL_ITERATIONS} best={result.best_fitness:.6f}")
     return {
@@ -251,6 +369,145 @@ def run_parallel() -> Dict[str, Any]:
         "elapsed_sec": float(result.elapsed),
         "strategy": _safe_strategy_to_json(strategy),
         "times": final_times,
+    }
+
+
+def run_push() -> Dict[str, Any]:
+    # Local import to avoid mandatory dependency if file not present
+    from .ppso import PushPSO
+    encoder, objective = build_problem_objective(
+        PROBLEM_ID, dt=GLOBAL_DT, aggregate=GLOBAL_AGGREGATE, weights=_maybe_weights()
+    )
+    best_times_fn = build_problem_times_fn(PROBLEM_ID, dt=GLOBAL_DT) if GLOBAL_SHOW_TIMES else None
+    pso = PushPSO(
+        dim=encoder.dim,
+        objective=objective,
+        swarm_size=PUSH_SWARM_SIZE,
+        iterations=PUSH_ITERATIONS,
+        inertia=PUSH_INERTIA,
+        cognitive=PUSH_COGNITIVE,
+        social=PUSH_SOCIAL,
+        reset_prob=PUSH_RESET_PROB,
+        velocity_clamp=PUSH_VELOCITY_CLAMP,
+        maximize=GLOBAL_MAXIMIZE,
+        processes=PUSH_PROCESSES,
+        seed=PUSH_SEED,
+        crowd_radius=PUSH_CROWD_RADIUS,
+        density_threshold=PUSH_DENSITY_THRESHOLD,
+        push_strength=PUSH_PUSH_STRENGTH,
+        adaptive_push=PUSH_ADAPTIVE_PUSH,
+        enable_crowding=False,  # explicitly disable O(N^2) crowding; rely on repellers
+        stagnation_iter_threshold=PUSH_STAGNATION_ITERS,
+        cluster_eps=PUSH_CLUSTER_EPS,
+        cluster_min_size=PUSH_CLUSTER_MIN_SIZE,
+        cluster_max_size=PUSH_CLUSTER_MAX_SIZE,
+        repeller_radius=PUSH_REPELLER_RADIUS,
+        repeller_strength=PUSH_REPELLER_STRENGTH,
+        repeller_decay=PUSH_REPELLER_DECAY,
+        save_on_exit=PUSH_SAVE_MODEL,
+        include_swarm_on_save=PUSH_INCLUDE_SWARM_ON_SAVE,
+    )
+    # ---- Apply extended PushPSO tuning constants (post-construction to keep backward compatibility) ----
+    # Local region stagnation repeller parameters
+    pso.region_stagnation_iters = PUSH_REGION_STAGNATION_ITERS
+    pso.region_min_group = PUSH_REGION_MIN_GROUP
+    pso.region_repeller_radius_scale = PUSH_REGION_REPELLER_RADIUS_SCALE
+    # Repeller capacity & behavior
+    pso.max_active_repellers = PUSH_MAX_ACTIVE_REPELLERS
+    pso.repeller_use_inverse_distance = PUSH_REPELLER_INVERSE_DISTANCE
+    # Advanced lifecycle controls (currently hard-coded; promote to constants/env if needed)
+    pso.repeller_max_age = 150
+    pso.repeller_radius_decay = 0.997
+    pso.max_new_repellers_per_iter = 3
+    pso.duplicate_distance_scale = 1.2
+    # Global stagnation escape overrides
+    pso.global_stagnation_iters = PUSH_GLOBAL_STAGNATION_ITERS
+    pso.global_stagnation_reinit_fraction = PUSH_GLOBAL_STAGNATION_REINIT_FRACTION
+    # Support both *_SCALE (new) and *_MULT (legacy) constant names
+    if 'PUSH_GLOBAL_STAGNATION_REPELLER_STRENGTH_SCALE' in globals():
+        pso.global_stagnation_repeller_strength = pso.repeller_strength * PUSH_GLOBAL_STAGNATION_REPELLER_STRENGTH_SCALE
+    else:
+        pso.global_stagnation_repeller_strength = pso.repeller_strength * PUSH_GLOBAL_STAGNATION_REPELLER_STRENGTH_MULT
+    if 'PUSH_GLOBAL_STAGNATION_REPELLER_RADIUS_SCALE' in globals():
+        pso.global_stagnation_repeller_radius = pso.repeller_radius * PUSH_GLOBAL_STAGNATION_REPELLER_RADIUS_SCALE
+    else:
+        pso.global_stagnation_repeller_radius = pso.repeller_radius * PUSH_GLOBAL_STAGNATION_REPELLER_RADIUS_MULT
+    # Run optimizer after parameter overrides
+    result = pso.run()
+    strategy = encoder.encode(list(result.best_position))
+    final_times = None
+    if GLOBAL_SHOW_TIMES:
+        final_times = best_times_fn(list(result.best_position)) if best_times_fn else build_problem_times_fn(PROBLEM_ID, dt=GLOBAL_DT)(list(result.best_position))
+    if GLOBAL_VERBOSE:
+        print(f"[PushPSO] Done iters={PUSH_ITERATIONS} best={result.best_fitness:.6f} repellers={len(result.repeller_events)}")
+    return {
+        "mode": "push",
+        "problem": PROBLEM_ID,
+        "best_fitness": float(result.best_fitness),
+        "best_position": result.best_position.tolist(),
+        "history": result.history,
+        "eval_count": int(result.eval_count),
+        "elapsed_sec": float(result.elapsed),
+        "strategy": _safe_strategy_to_json(strategy),
+        "times": final_times,
+        "repeller_events": int(len(result.repeller_events)),
+    }
+
+def run_staged() -> Dict[str, Any]:
+    if StagedDimPSO is None:
+        raise RuntimeError("StagedDimPSO module not available.")
+    encoder, objective = build_problem_objective(
+        PROBLEM_ID, dt=GLOBAL_DT, aggregate=GLOBAL_AGGREGATE, weights=_maybe_weights()
+    )
+    # Build bounds (reuse [-1,1] if no explicit provided; real encoder内部自己再映射)
+    lo = np.full(encoder.dim, -1.0)
+    hi = np.full(encoder.dim, 1.0)
+    staged = StagedDimPSO(
+        dim=encoder.dim,
+        objective=objective,
+        mode=STAGED_MODE_TYPE,
+        group_size=STAGED_GROUP_SIZE,
+        window_size=STAGED_WINDOW_SIZE,
+        stride=STAGED_STRIDE,
+        iterations_per_stage=STAGED_ITERATIONS_PER_STAGE,
+        swarm_size=STAGED_SWARM_SIZE,
+        maximize=GLOBAL_MAXIMIZE,
+        bounds=(lo, hi),
+        seed=STAGED_SEED,
+        refine_full=STAGED_REFINE_FULL,
+        refine_iterations=STAGED_REFINE_ITERATIONS,
+        max_stages=STAGED_MAX_STAGES,
+        verbose=GLOBAL_VERBOSE,
+    )
+    result = staged.run()
+    strategy = encoder.encode(list(result.best_position))
+    # Build per-stage summary subset (avoid huge dump)
+    stage_summaries = [{
+        "id": lg.stage_id,
+        "k": lg.sub_dim,
+        "improved": lg.improved_global,
+        "after": lg.global_best_after
+    } for lg in result.stage_logs]
+    section = {
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "dim": encoder.dim,
+        "best_fitness": float(result.best_fitness),
+        "best_position": result.best_position.tolist(),
+        "stage_count": len(result.stage_logs),
+        "stage_summaries": stage_summaries,
+    }
+    merge_optimizer_section(PROBLEM_ID, "staged", section, maximize=GLOBAL_MAXIMIZE)
+    if GLOBAL_VERBOSE:
+        print(f"[StagedDimPSO] Done stages={len(result.stage_logs)} best={result.best_fitness:.6f}")
+    return {
+        "mode": "staged",
+        "problem": PROBLEM_ID,
+        "best_fitness": float(result.best_fitness),
+        "best_position": result.best_position.tolist(),
+        "stage_count": len(result.stage_logs),
+        "eval_count": int(result.eval_count),
+        "strategy": _safe_strategy_to_json(strategy),
+        "elapsed_sec": None,
     }
 
 def run_block() -> Dict[str, Any]:
@@ -286,23 +543,51 @@ def run_block() -> Dict[str, Any]:
         models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
         os.makedirs(models_dir, exist_ok=True)
         path = os.path.join(models_dir, f"{BLOCK_SAVE_MODEL}.json")
-        payload = {
-            "schema": 1,
-            "mode": "block",
-            "problem": PROBLEM_ID,
-            "dim": encoder.dim,
+
+        # Merge block optimizer results into a unified per-problem file.
+        existing: dict = {}
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    existing = json.load(f) or {}
+            except Exception:
+                existing = {}
+
+        # Optimizer-specific section aggregation
+        optimizers = existing.get("optimizers", {})
+
+        block_section = {
             "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "dim": encoder.dim,
             "best_fitness": float(result.best_fitness),
             "best_position": result.best_position.tolist(),
+            "history": result.history,
             "round_history": result.block_histories,
         }
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            if GLOBAL_VERBOSE:
-                print(f"[BlockPSO] Summary saved {path}")
-        except Exception as e:
-            print(f"[BlockPSO] Save failed ({e})")
+        if final_times is not None:
+            block_section["times"] = final_times
+
+        optimizers["block"] = block_section
+
+        # Maintain / update backward-compatible top-level best fields.
+        current_best = existing.get("best_fitness")
+        if current_best is None:
+            existing["best_fitness"] = float(result.best_fitness)
+            existing["best_position"] = result.best_position.tolist()
+        else:
+            better = (result.best_fitness > current_best) if GLOBAL_MAXIMIZE else (result.best_fitness < current_best)
+            if better:
+                existing["best_fitness"] = float(result.best_fitness)
+                existing["best_position"] = result.best_position.tolist()
+
+        existing["optimizers"] = optimizers
+        existing.setdefault("schema", 1)
+        existing["problem"] = PROBLEM_ID
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+        print(f"[BlockPSO] Model merged into {path}", flush=True)
+        # (legacy block save code removed; unified merge already written above)
     if GLOBAL_VERBOSE:
         print(f"[BlockPSO] Done rounds={len(result.history)} best={result.best_fitness:.6f}")
     return {
@@ -430,47 +715,305 @@ def run_dpso() -> Dict[str, Any]:
     }
 
 def run_hybrid() -> Dict[str, Any]:
-    if HybridDE_DPSO is None:
-        raise RuntimeError("HybridDE_DPSO module not available.")
-    hybrid = HybridDE_DPSO(
-        problem_id=PROBLEM_ID,
-        aggregate=GLOBAL_AGGREGATE,
-        weights=_maybe_weights(),
+    """
+    New hybrid pipeline (inline):
+        Stage 1: Differential Evolution (large population, few generations)
+        Stage 2: StagedDimPSO refinement (uses STAGED_* configuration constants)
+        Stage 3: Optional PushPSO polish (crowding disabled)
+
+    Keeps outward contract (mode='hybrid') while removing legacy DPSO usage.
+    A synthetic 'dpso' section is still written for backward compatibility,
+    mapping to the staged refinement results.
+    """
+    # Safe initial placeholders for static/type analyzers; real values set in Stage 1
+    stage1_algo = "de"
+    de_res = None  # will hold GA or DE result object
+    # -------- Stage 0: Build objective & encoder ----------
+    encoder, base_objective = build_problem_objective(
+        PROBLEM_ID, dt=HYBRID_DT_END, aggregate=GLOBAL_AGGREGATE, weights=_maybe_weights()
+    )
+
+    # -------- Stage 1: Differential Evolution -------------
+    if DifferentialEvolution is None:
+        raise RuntimeError("DifferentialEvolution module not available (needed for hybrid).")
+
+    use_ga = 'HYBRID_GA_ENABLE' in globals() and HYBRID_GA_ENABLE
+    if use_ga:
+        try:
+            from .ga import GeneticAlgorithm
+            ga = GeneticAlgorithm(
+                dim=encoder.dim,
+                objective=base_objective,
+                population_size=HYBRID_GA_POPULATION,
+                generations=HYBRID_GA_GENERATIONS,
+                elite_fraction=HYBRID_GA_ELITE_FRACTION,
+                tournament_k=HYBRID_GA_TOURNAMENT_K,
+                crossover_rate=HYBRID_GA_CROSSOVER_RATE,
+                mutation_rate=HYBRID_GA_MUTATION_RATE,
+                mutation_sigma_frac=HYBRID_GA_MUTATION_SIGMA_FRAC,
+                jitter_seed_fraction=HYBRID_GA_JITTER_SEED_FRACTION,
+                stagnation_patience=HYBRID_GA_STAGNATION_PATIENCE,
+                maximize=GLOBAL_MAXIMIZE,
+                processes=None,
+                seed=HYBRID_SEED,
+                init_model=None,
+                perturb_std=0.15,
+                save_on_exit=None,
+                include_swarm_on_save=False,
+            )
+            de_res = ga.run()  # alias to reuse downstream variable names
+            stage1_algo = "ga"
+            if GLOBAL_VERBOSE:
+                print(f"[Hybrid] GA stage done best={de_res.best_fitness:.6f}")
+        except Exception as _e:
+            if GLOBAL_VERBOSE:
+                print(f"[Hybrid] GA unavailable ({_e}); falling back to DE.")
+            use_ga = False
+    if not use_ga:
+        de = DifferentialEvolution(
+            dim=encoder.dim,
+            objective=base_objective,
+            population_size=HYBRID_DE_POPULATION,
+            generations=HYBRID_DE_GENERATIONS,
+            F=HYBRID_DE_F,
+            CR=HYBRID_DE_CR,
+            elite_fraction=HYBRID_DE_ELITE_FRACTION,
+            tournament_k=HYBRID_DE_TOURNAMENT_K,
+            maximize=GLOBAL_MAXIMIZE,
+            processes=None,
+            seed=HYBRID_SEED,
+            init_model=None,
+            perturb_std=0.15,
+            save_on_exit=None,
+            include_swarm_on_save=False,
+        )
+        de_res = de.run()
+        stage1_algo = "de"
+        if GLOBAL_VERBOSE:
+            print(f"[Hybrid] DE stage done best={de_res.best_fitness:.6f}")
+
+    # -------- Stage 2: StagedDimPSO Refinement ------------
+    if StagedDimPSO is None:
+        raise RuntimeError("StagedDimPSO module not available (needed for hybrid).")
+
+    lo = np.full(encoder.dim, -1.0)
+    hi = np.full(encoder.dim,  1.0)
+
+    staged = StagedDimPSO(
+        dim=encoder.dim,
+        objective=base_objective,
+        mode=STAGED_MODE_TYPE,
+        group_size=STAGED_GROUP_SIZE,
+        window_size=STAGED_WINDOW_SIZE,
+        stride=STAGED_STRIDE,
+        iterations_per_stage=STAGED_ITERATIONS_PER_STAGE,
+        swarm_size=STAGED_SWARM_SIZE,
         maximize=GLOBAL_MAXIMIZE,
-        judge=GLOBAL_JUDGE,
-        de_population=HYBRID_DE_POPULATION,
-        de_generations=HYBRID_DE_GENERATIONS,
-        de_F=HYBRID_DE_F,
-        de_CR=HYBRID_DE_CR,
-        dt_start=HYBRID_DT_START,
-        dt_end=HYBRID_DT_END,
-        elite_fraction=HYBRID_ELITE_FRACTION,
-        elite_top_k=HYBRID_ELITE_TOP_K,
-        per_dim_category_cap=HYBRID_PER_DIM_CATEGORY_CAP,
-        min_categories_per_dim=HYBRID_MIN_CATEGORIES_PER_DIM,
-        dpso_swarm_size=HYBRID_DPSO_SWARM_SIZE,
-        dpso_iterations=HYBRID_DPSO_ITERATIONS,
-        seed=HYBRID_SEED,
-        show_times=GLOBAL_SHOW_TIMES,
+        bounds=(lo, hi),
+        seed=STAGED_SEED,
+        refine_full=STAGED_REFINE_FULL,
+        refine_iterations=STAGED_REFINE_ITERATIONS,
+        max_stages=STAGED_MAX_STAGES,
         verbose=GLOBAL_VERBOSE,
     )
-    out = hybrid.run()
-    # Flatten final summary keys for uniform summary reporting
+    # Warm start staged with Stage 1 best
+    if de_res is None:
+        raise RuntimeError("Stage 1 (DE/GA) failed to produce a result.")
+    staged.full_best = de_res.best_position.copy()
+    staged.full_best_fitness = float(de_res.best_fitness)
+    staged.eval_count += 1  # account for reused fitness as "known"
+    staged_res = staged.run()
+    if GLOBAL_VERBOSE:
+        print(f"[Hybrid] Staged refinement done best={staged_res.best_fitness:.6f}")
+
+    # Synthetic history for compatibility
+    staged_history = [lg.global_best_after for lg in staged_res.stage_logs]
+
+    # -------- Stage 3: Optional PushPSO polish ------------
+    push_section = None
+    final_best_fitness = float(staged_res.best_fitness)
+    final_best_position = staged_res.best_position.copy()
+    final_source = "staged"
+
+    if HYBRID_ENABLE_PUSH:
+        try:
+            from .ppso import PushPSO
+            push = PushPSO(
+                dim=encoder.dim,
+                objective=base_objective,
+                swarm_size=HYBRID_PUSH_SWARM,
+                iterations=HYBRID_PUSH_ITERS,
+                inertia=HYBRID_PUSH_INERTIA,
+                cognitive=HYBRID_PUSH_COG,
+                social=HYBRID_PUSH_SOC,
+                reset_prob=HYBRID_PUSH_RESET_PROB,
+                velocity_clamp=None,
+                maximize=GLOBAL_MAXIMIZE,
+                processes=None,
+                seed=(HYBRID_SEED or 0) + 4242,
+                crowd_radius=None,
+                density_threshold=6,
+                push_strength=HYBRID_PUSH_REPELLER_STRENGTH,
+                adaptive_push=True,
+                enable_crowding=False,   # 禁用昂贵 crowding
+                stagnation_iter_threshold=20,
+                cluster_eps=0.15,
+                cluster_min_size=5,
+                cluster_max_size=12,
+                repeller_radius=HYBRID_PUSH_REPELLER_RADIUS,
+                repeller_strength=HYBRID_PUSH_REPELLER_STRENGTH,
+                repeller_decay=HYBRID_PUSH_REPELLER_DECAY,
+                save_on_exit=None,
+                include_swarm_on_save=False,
+            )
+            # Warm start around staged best
+            center = staged_res.best_position
+            noise = np.random.normal(0, 0.18, (HYBRID_PUSH_SWARM, center.shape[0]))
+            push.positions = np.clip(center[None, :] + noise, -1.0, 1.0)
+            push.personal_best_positions = push.positions.copy()
+            if GLOBAL_MAXIMIZE:
+                push.personal_best_fitness[:] = -np.inf
+                push.global_best_fitness = -np.inf
+            else:
+                push.personal_best_fitness[:] = np.inf
+                push.global_best_fitness = np.inf
+            push.global_best_position = push.positions[0].copy()
+
+            push_res = push.run()
+            push_section = {
+                "best_fitness": float(push_res.best_fitness),
+                "best_position": push_res.best_position.tolist(),
+                "history": push_res.history,
+                "elapsed_sec": float(push_res.elapsed),
+                "eval_count": int(push_res.eval_count),
+            }
+            if GLOBAL_VERBOSE:
+                print(f"[Hybrid] Push polish done best={push_res.best_fitness:.6f}")
+            improved = (push_res.best_fitness > final_best_fitness) if GLOBAL_MAXIMIZE else (push_res.best_fitness < final_best_fitness)
+            if improved:
+                final_best_fitness = float(push_res.best_fitness)
+                final_best_position = push_res.best_position.copy()
+                final_source = "push"
+        except Exception as e:
+            if GLOBAL_VERBOSE:
+                print(f"[Hybrid] Push stage skipped ({e})")
+
+    # -------- Per-missile times (optional) ---------------
+    final_times = None
+    if GLOBAL_SHOW_TIMES:
+        try:
+            times_fn = build_problem_times_fn(PROBLEM_ID, dt=HYBRID_DT_END)
+            final_times = times_fn(final_best_position.tolist())
+        except Exception:
+            pass
+
+    # -------- Unified model merge ------------------------
+    section: Dict[str, Any] = {
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "stage1_algo": stage1_algo,
+        "de_best_fitness": float(de_res.best_fitness),
+        "staged_best_fitness": float(staged_res.best_fitness),
+        "final_best_fitness": float(final_best_fitness),
+        "source": final_source,
+        "history_de": de_res.history,
+        "history_staged": staged_history,
+    }
+    if push_section:
+        section["push_best_fitness"] = push_section["best_fitness"]
+        section["history_push"] = push_section["history"]
+
+    merge_optimizer_section(PROBLEM_ID, "hybrid", section, maximize=GLOBAL_MAXIMIZE)
+
     return {
         "mode": "hybrid",
         "problem": PROBLEM_ID,
-        "best_fitness": float(out["final"]["best_fitness"]),
-        "best_position": out["final"]["best_position_continuous"],
-        "elapsed_sec": float(out["total_elapsed_sec"]),
-        "history_de": out["de"]["history"],
-        "history_dpso": out["dpso"]["history"],
-        "times": out["final"]["per_missile_times"],
+        "best_fitness": float(final_best_fitness),
+        "best_position": final_best_position.tolist(),
+        "elapsed_sec": None,
+        "stage1_algo": stage1_algo,
+        "history_de": de_res.history,
+        "history_staged": staged_history,
+        "history_push": push_section["history"] if push_section else None,
+        "times": final_times,
+        "source": final_source,
     }
 
 # =============================================================================
 # Main
 # =============================================================================
+def run_reduced() -> Dict[str, Any]:
+    """
+    Reduced-dimension optimization for Problem 5 using ReducedProblem5Encoder (50 dims).
+    Falls back to normal problem 5 fitness pipeline by converting to full 55-dim raw vector.
+    """
+    if PROBLEM_ID != 5:
+        raise ValueError("Reduced mode only supported when PROBLEM_ID == 5.")
+    try:
+        from .reduced_p5 import build_reduced_problem5_objective, reduced_to_full55
+        from .encoders import Problem5Encoder
+    except Exception as e:
+        raise RuntimeError(f"Reduced encoder module not available: {e}")
+    encoder, objective = build_reduced_problem5_objective(
+        dt=GLOBAL_DT,
+        aggregate=GLOBAL_AGGREGATE,
+        weights=_maybe_weights()
+    )
+    # Reuse ParallelPSO core (could also allow PushPSO later)
+    pso = ParallelPSO(
+        dim=encoder.dim,
+        objective=objective,
+        swarm_size=PARALLEL_SWARM_SIZE,
+        iterations=PARALLEL_ITERATIONS,
+        inertia=PARALLEL_INERTIA,
+        cognitive=PARALLEL_COGNITIVE,
+        social=PARALLEL_SOCIAL,
+        reset_prob=PARALLEL_RESET_PROB,
+        velocity_clamp=PARALLEL_VELOCITY_CLAMP,
+        maximize=GLOBAL_MAXIMIZE,
+        processes=PARALLEL_PROCESSES,
+        seed=PARALLEL_SEED,
+        best_times_fn=None,
+        init_model=None,
+        perturb_std=PARALLEL_PERTURB_STD,
+        save_on_exit=None,
+        include_swarm_on_save=False,
+    )
+    res = pso.run()
+    # Convert reduced best vector to full 55 then to a readable strategy
+    full_raw = reduced_to_full55(res.best_position.tolist())
+    # Use standard Problem5Encoder for final readable strategy
+    std_enc = Problem5Encoder()
+    strategy = std_enc.encode(full_raw)
+    # (Optional) compute times
+    if GLOBAL_SHOW_TIMES:
+        from .pso import build_problem_times_fn
+        times_fn = build_problem_times_fn(5, dt=GLOBAL_DT)
+        times = times_fn(full_raw)
+    else:
+        times = None
+    return {
+        "mode": "reduced",
+        "problem": 5,
+        "best_fitness": float(res.best_fitness),
+        "best_position": res.best_position.tolist(),  # reduced space vector
+        "history": res.history,
+        "elapsed_sec": float(res.elapsed),
+        "eval_count": int(res.eval_count),
+        "strategy": _safe_strategy_to_json(strategy),
+        "times": times,
+    }
+
+
 def main():
+    # Robust forced sampling K override: ensure later calls (or defaults elsewhere) cannot
+    # silently revert to a larger K. If judge != "sample" this is a cheap no-op.
+    if GLOBAL_JUDGE == "sample":
+        try:
+            from .pso import force_sample_K  # local import to avoid unused symbol when not sampling
+            force_sample_K(GLOBAL_JUDGE_SAMPLE_K, verbose=GLOBAL_VERBOSE)
+        except Exception as e:
+            if GLOBAL_VERBOSE:
+                print(f"[Judge] Failed to force sampling K={GLOBAL_JUDGE_SAMPLE_K} ({e}); continuing.", flush=True)
     select_judge(
         GLOBAL_JUDGE,
         K=GLOBAL_JUDGE_SAMPLE_K if GLOBAL_JUDGE == "sample" else 32,
@@ -486,12 +1029,109 @@ def main():
         result = run_dpso()
     elif MODE == "hybrid":
         result = run_hybrid()
+    elif MODE == "push":
+        result = run_push()
+    elif MODE == "reduced":
+        result = run_reduced()
+    elif MODE == "staged":
+        result = run_staged()
     else:
-        raise ValueError(f"Unknown MODE={MODE}. Use 'parallel' | 'block' | 'de' | 'dpso' | 'hybrid'.")
+        raise ValueError(f"Unknown MODE={MODE}. Use 'parallel' | 'block' | 'de' | 'dpso' | 'hybrid' | 'push' | 'reduced' | 'staged'.")
     summary_keys = ["mode", "problem", "best_fitness", "elapsed_sec"]
     summary = {k: result[k] for k in summary_keys if k in result}
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return result
+
+# ---------------------------------------------------------------------------
+# Unified per-problem model save/load helpers
+# ---------------------------------------------------------------------------
+def _unified_model_path(problem_id: int) -> str:
+    """
+    Resolve (and create if needed) the unified per-problem model JSON path.
+    Filename pattern: problem{problem_id}_latest.json
+    """
+    models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
+    os.makedirs(models_dir, exist_ok=True)
+    return os.path.join(models_dir, f"problem{problem_id}_latest.json")
+
+
+def load_unified_model(problem_id: int) -> dict:
+    """
+    Load the unified per-problem JSON (if exists). Returns {} on any failure.
+    Structure (evolving):
+    {
+      "schema": 1,
+      "problem": <int>,
+      "best_fitness": <float>,
+      "best_position": [...],
+      "optimizers": {
+         "parallel": {...},
+         "block": {...},
+         "de": {...},
+         "dpso": {...},
+         "hybrid": {...},
+         "push": {...}
+      }
+    }
+    """
+    path = _unified_model_path(problem_id)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def merge_optimizer_section(problem_id: int,
+                            optimizer: str,
+                            section: dict,
+                            maximize: bool = True) -> str:
+    """
+    Merge (or insert) an optimizer-specific result section into the unified
+    per-problem JSON. Also maintains top-level best_fitness / best_position
+    for quick interchange across optimizers.
+
+    Args:
+      problem_id : problem identifier
+      optimizer  : short key ("parallel", "block", "de", "dpso", "hybrid", "push", ...)
+      section    : dict containing at least best_fitness (and optionally best_position, history, etc.)
+      maximize   : whether larger fitness is better (default True)
+
+    Returns:
+      Path to the unified JSON file.
+    """
+    data = load_unified_model(problem_id)
+    optimizers = data.get("optimizers", {})
+    optimizers[optimizer] = section
+    data["optimizers"] = optimizers
+    data.setdefault("schema", 1)
+    data["problem"] = problem_id
+
+    new_best = section.get("best_fitness")
+    if new_best is not None:
+        current_best = data.get("best_fitness")
+        if current_best is None:
+            data["best_fitness"] = new_best
+            if "best_position" in section:
+                data["best_position"] = section["best_position"]
+        else:
+            better = (new_best > current_best) if maximize else (new_best < current_best)
+            if better:
+                data["best_fitness"] = new_best
+                if "best_position" in section:
+                    data["best_position"] = section["best_position"]
+
+    path = _unified_model_path(problem_id)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    if GLOBAL_VERBOSE:
+        print(f"[UNIFIED] Merged optimizer='{optimizer}' into {os.path.basename(path)}", flush=True)
+    return path
 
 if __name__ == "__main__":
     main()

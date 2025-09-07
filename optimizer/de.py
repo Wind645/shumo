@@ -57,6 +57,8 @@ class DifferentialEvolution:
       save_on_exit        : auto-save model name (JSON)
       include_swarm_on_save: include full population in JSON
       bounds              : (lo, hi) arrays length dim, elementwise
+      elite_fraction      : fraction (0..1) of top individuals preserved each generation (GA-style). 0 => disabled
+      tournament_k        : tournament size (>=2) when selecting non-elites (ignored if elite_fraction=0 and k<=1)
 
     JSON schema matches PSO save for interchangeability:
       {
@@ -85,7 +87,9 @@ class DifferentialEvolution:
                  save_on_exit: Optional[str] = None,
                  include_swarm_on_save: bool = True,
                  bounds: Optional[Tuple[Union[Sequence[float], np.ndarray],
-                                        Union[Sequence[float], np.ndarray]]] = None):
+                                        Union[Sequence[float], np.ndarray]]] = None,
+                 elite_fraction: float = 0.0,
+                 tournament_k: int = 2):
         self.dim = dim
         self.objective = objective
         self.population_size = population_size
@@ -103,6 +107,11 @@ class DifferentialEvolution:
         self.models_dir = models_dir or os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
         self.save_on_exit = save_on_exit
         self.include_swarm_on_save = include_swarm_on_save
+        # GA-style hybrid selection parameters
+        self.elite_fraction = max(0.0, min(1.0, float(elite_fraction)))
+        self.tournament_k = int(tournament_k) if tournament_k is not None else 2
+        if self.tournament_k < 2:
+            self.tournament_k = 2
 
         # Bounds
         if bounds is not None:
@@ -265,16 +274,72 @@ class DifferentialEvolution:
                 trial_fitness = pool.map(_worker_eval_vector, trials)
                 eval_count += len(trial_fitness)
 
-                # Selection
-                for i in range(self.population_size):
-                    tf = trial_fitness[i]
-                    better = tf > self.fitness[i] if self.maximize else tf < self.fitness[i]
-                    if better:
-                        self.population[i] = trials[i]
-                        self.fitness[i] = tf
-                        if (tf > self.best_fitness and self.maximize) or (tf < self.best_fitness and (not self.maximize)):
-                            self.best_fitness = tf
-                            self.best_position = trials[i].copy()
+                # Selection (classic DE 1-to-1 or optional GA-style elitist+tournament)
+                if self.elite_fraction > 0.0 or self.tournament_k > 1 and self.elite_fraction > 0.0:
+                    # Combine parents + trials
+                    combined_pop = np.concatenate([self.population, trials], axis=0)
+                    combined_fit = np.concatenate([self.fitness, np.asarray(trial_fitness, dtype=float)], axis=0)
+
+                    # Sort for elites
+                    if self.maximize:
+                        order = np.argsort(-combined_fit)
+                    else:
+                        order = np.argsort(combined_fit)
+                    elite_count = max(1, int(round(self.elite_fraction * self.population_size)))
+                    elite_indices = order[:elite_count]
+
+                    new_pop = []
+                    new_fit = []
+
+                    # Add elites
+                    for idx in elite_indices:
+                        new_pop.append(combined_pop[idx])
+                        new_fit.append(combined_fit[idx])
+
+                    remaining_needed = self.population_size - elite_count
+                    # Candidate pool excluding elites
+                    remaining_indices = [idx for idx in order[elite_count:]]
+                    if remaining_needed > 0:
+                        # Tournament selection
+                        rng = random
+                        for _ in range(remaining_needed):
+                            if not remaining_indices:
+                                break
+                            # sample k distinct
+                            sample = rng.sample(remaining_indices, k=min(self.tournament_k, len(remaining_indices)))
+                            # pick best among sample
+                            if self.maximize:
+                                best_idx = max(sample, key=lambda ii: combined_fit[ii])
+                            else:
+                                best_idx = min(sample, key=lambda ii: combined_fit[ii])
+                            new_pop.append(combined_pop[best_idx])
+                            new_fit.append(combined_fit[best_idx])
+                            # remove chosen from pool
+                            remaining_indices.remove(best_idx)
+
+                    self.population = np.asarray(new_pop, dtype=float)
+                    self.fitness = np.asarray(new_fit, dtype=float)
+
+                    # Update global best
+                    if self.maximize:
+                        best_i = int(np.argmax(self.fitness))
+                    else:
+                        best_i = int(np.argmin(self.fitness))
+                    best_val = self.fitness[best_i]
+                    if (best_val > self.best_fitness and self.maximize) or (best_val < self.best_fitness and (not self.maximize)):
+                        self.best_fitness = float(best_val)
+                        self.best_position = self.population[best_i].copy()
+                else:
+                    # Classic DE pairwise selection
+                    for i in range(self.population_size):
+                        tf = trial_fitness[i]
+                        better = tf > self.fitness[i] if self.maximize else tf < self.fitness[i]
+                        if better:
+                            self.population[i] = trials[i]
+                            self.fitness[i] = tf
+                            if (tf > self.best_fitness and self.maximize) or (tf < self.best_fitness and (not self.maximize)):
+                                self.best_fitness = tf
+                                self.best_position = trials[i].copy()
 
                 history.append(float(self.best_fitness))
                 if self.best_times_fn is not None:

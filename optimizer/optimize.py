@@ -35,6 +35,7 @@ import json
 import time
 from typing import Any, Dict, List, Sequence, Optional
 import numpy as np
+from .save_system import UniversalSaveSystem, SaveState
 
 from .pso import (
     ParallelPSO,
@@ -72,7 +73,7 @@ except Exception:  # pragma: no cover
 # =============================================================================
 
 # Mode: "parallel" | "block" | "de" | "dpso" | "hybrid" | "push" | "reduced" | "staged"
-MODE: str = "hybrid"
+MODE: str = "de"
 
 # Problem id (2..5)
 PROBLEM_ID: int = 4
@@ -189,14 +190,14 @@ BLOCK_SAVE_MODEL: Optional[str] = UNIFIED_MODEL_BASENAME
 # ---------------- Differential Evolution specific ----------------
 # Large-pop configuration: larger population improves coverage; tune generations & F accordingly.
 # Population raised (>=2000 as requested). F lowered for stability with large diversity.
-DE_GENERATIONS: int = 120          # more total evaluations with large population
-DE_POPULATION_SIZE: int = 2048     # large population as per requirement (>=2000)
-DE_F: float = 0.6                  # slightly smaller differential weight to reduce overshoot in large pop
+DE_GENERATIONS: int = 250         # more total evaluations with large population
+DE_POPULATION_SIZE: int = 5000     # large population as per requirement (>=2000)
+DE_F: float = 0.9                  # slightly smaller differential weight to reduce overshoot in large pop
 DE_CR: float = 0.9                 # keep crossover rate
 DE_PROCESSES: Optional[int] = None
-DE_SEED: Optional[int] = 123
+DE_SEED: Optional[int] = 111
 DE_INIT_MODEL: Optional[str] = UNIFIED_MODEL_BASENAME
-DE_PERTURB_STD: float = 0.12       # slightly lower perturb around best when warm starting large population
+DE_PERTURB_STD: float = 0.7      # slightly lower perturb around best when warm starting large population
 DE_SAVE_MODEL: Optional[str] = UNIFIED_MODEL_BASENAME
 DE_INCLUDE_POP_ON_SAVE: bool = True
 
@@ -233,7 +234,7 @@ DPSO_SEED: Optional[int] = 555
 # Stage 1: Differential Evolution (global exploration)
 HYBRID_DE_POPULATION: int = 10000
 HYBRID_DE_GENERATIONS: int = 200
-HYBRID_DE_F: float = 0.75
+HYBRID_DE_F: float = 0.9
 HYBRID_DE_CR: float = 0.9
 # Optional DE elitism / selection tuning (GA-style)
 HYBRID_DE_ELITE_FRACTION: float = 0.01  # keep top 1% each generation (if supported)
@@ -1037,6 +1038,53 @@ def main():
         result = run_staged()
     else:
         raise ValueError(f"Unknown MODE={MODE}. Use 'parallel' | 'block' | 'de' | 'dpso' | 'hybrid' | 'push' | 'reduced' | 'staged'.")
+    # ---------------- Universal final save snapshot ----------------
+    try:
+        save_sys = UniversalSaveSystem(problem_id=PROBLEM_ID, save_interval=1)
+        # Derive a generic history (different optimizers use different keys)
+        history = (
+            result.get("history")
+            or result.get("history_de")
+            or result.get("history_staged")
+            or result.get("history_push")
+            or result.get("history_per_round")
+            or []
+        )
+        iteration = len(history)
+        # Best position may be absent for discrete mode; fall back to best_values
+        best_position = result.get("best_position")
+        if best_position is None and "best_values" in result:
+            try:
+                best_position = [float(v) for v in result["best_values"]]
+            except Exception:
+                best_position = []
+        if best_position is None:
+            best_position = []
+        eval_count = int(result.get("eval_count", 0))
+        elapsed_sec = result.get("elapsed_sec")
+        if elapsed_sec is None:
+            # Some modes (hybrid/staged) put elapsed inside sub-sections or omit; use 0 fallback
+            elapsed_sec = 0.0
+        save_state = SaveState(
+            problem_id=PROBLEM_ID,
+            optimizer_type=result.get("mode", MODE),
+            iteration=iteration,
+            best_fitness=float(result.get("best_fitness") if result.get("best_fitness") is not None else float("nan")),
+            best_position=best_position,
+            fitness_history=history,
+            eval_count=eval_count,
+            elapsed_time=float(elapsed_sec) if isinstance(elapsed_sec, (int, float)) else 0.0,
+            optimizer_state={},  # Placeholder; extend by exposing internal state if needed
+            save_timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            total_iterations=iteration,   # If desired, replace with configured target iterations per mode
+            dimensions=len(best_position),
+            best_strategy=result.get("strategy"),
+            best_times=result.get("times"),
+        )
+        save_sys.save_progress(save_state, force=True)
+    except Exception as e:
+        if GLOBAL_VERBOSE:
+            print(f"[SaveSystem] Final save failed: {e}", flush=True)
     summary_keys = ["mode", "problem", "best_fitness", "elapsed_sec"]
     summary = {k: result[k] for k in summary_keys if k in result}
     print(json.dumps(summary, ensure_ascii=False, indent=2))

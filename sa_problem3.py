@@ -1,65 +1,65 @@
 from __future__ import annotations
 """
-Simulated Annealing solver for Problem 2:
-  Optimize FY1 (single UAV, single smoke bomb) parameters to maximize M1 occlusion time.
+Simulated Annealing solver for Problem 3:
+  Optimize FY1 (single UAV, three smoke bombs) parameters to maximize M1 occlusion time.
 Decision variables:
-  - speed ∈ [70, 140] m/s
+  - speed ∈ [70, 140] m/s (fixed throughout flight)
   - azimuth ∈ [0, 2π)  (horizontal heading, x-axis = 0, CCW positive)
-  - release_time ∈ [0, T_rel_max]
-  - explode_delay ∈ [delay_min, delay_max]
+  - For each of 3 bombs i ∈ {1,2,3}:
+      - deploy_time_i ∈ [0, rel_max]
+      - explode_delay_i ∈ [0, delay_max]
+    Subject to: deploy_time_{i+1} - deploy_time_i ≥ 1.0 seconds
 Objective:
-  Maximize total occluded time (seconds) returned by evaluate_problem2().
+  Maximize total occluded time (seconds) on M1 (overlaps not double-counted) using evaluate_problem3().
 
 Usage:
-  python sa_problem2.py --iters 4000 --method judge_caps --seed 42
+  python sa_problem3.py  # use CONFIG below
+  python sa_problem3.py --use-cli --iters 40000 --method judge_caps --seed 42  # optional CLI
 
 Notes:
   - judge_caps 解析法较快（仅端面两圆, 较保守）；sampling 更精确但慢。
-  - You can raise --rel-max / --delay-max to enlarge search space.
   - 支持周期性保存最优解 (--checkpoint-file, --ckpt-steps / --ckpt-seconds)
-  - 新增高级探索参数：重热 / Cauchy 邻域 / 随机跳跃 / 重启
-  - 现在支持直接在代码顶部配置参数 (CONFIG)，无需命令行。
-    你只需修改 CONFIG 字典即可调整优化行为。
+  - 使用与问题2一致的高级探索（Cauchy / mixed 邻域、重热、全局跳跃、重启等）
+  - 结果将导出到 result1.xlsx（若缺少 pandas/openpyxl 会提示安装）
 """
-import argparse  # 仍保留，但默认不再使用命令行
+import argparse
 import math
+import os
+import json
 import random
 import time
-import json
-import os
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Tuple, Dict
+from typing import List, Tuple, Dict
 
 import numpy as np
 
-from optimizer_api import evaluate_problem2
+from optimizer_api import evaluate_problem3
 
 # ===================== 用户可直接修改的配置区域 =====================
-# 每个键后面给出含义与推荐范围。修改后直接: python3 sa_problem2.py 运行即可。
 CONFIG = dict(
     # 基础仿真 / 目标
-    method="judge_caps",          # 遮蔽判定方法: 'judge_caps' (快, 保守) 或 'sampling' (慢, 精细)
+    method="judge_caps",          # 遮蔽判定方法: 'judge_caps' (快, 保守) | 'sampling' (慢, 精细)
     dt=0.02,                       # 仿真时间步 (s) 适中:0.05  精细:0.02  粗略:0.1
-    rel_max=66.0,                  # 投放时间搜索上界 (s)
-    delay_max=20.0,                # 起爆延迟搜索上界 (s)
+    rel_max=66.0,                  # 投放时间上界 (s)
+    delay_max=20.0,                # 起爆延迟上界 (s)
 
     # 初始随机解与退火主控
-    t0=1.2,                        # 初始温度 (越大越容易接受差解)
+    t0=1.2,                        # 初始温度
     t_end=1e-3,                    # 终止温度阈值
-    alpha=0.998,                   # 每轮降温因子 (越接近1 降温越慢)
+    alpha=0.988,                   # 每轮降温因子
     steps_per_t=60,                # 每个温度水平的 Metropolis 迭代次数
-    max_steps=200000,               # 总步数上限 (主控迭代预算)
-    seed=42,                       # 随机种子 (改为 None 使用系统随机)
+    max_steps=200000,              # 总步数上限
+    seed=42,                       # 随机种子 (None=使用系统随机)
 
     # 邻域与探索强度
-    neighbor_mode="mixed",        # 'gauss' | 'cauchy' | 'mixed' (推荐 mixed)
+    neighbor_mode="mixed",        # 'gauss' | 'cauchy' | 'mixed'
     cauchy_scale=1.2,              # Cauchy 重尾尺度 (mixed 或 cauchy 模式生效)
     mixed_gauss_prob=0.45,         # mixed 模式下使用高斯的概率
     temp_scale=1.25,               # 额外放大 (温度*temp_scale) 以增大步长
 
     # 全局跳跃 / 重启 / 重热
-    global_jump_prob=0.05,         # 每步触发一次“全新随机解”尝试的概率
+    global_jump_prob=0.05,         # 全局跳跃概率（尝试全新随机解）
     accept_worse_jump=True,        # 全局跳跃是否允许更差也替换当前位置
     restart_every=15000,           # 硬重启周期 (0=关闭)
     reheat_every=5000,             # 周期性重热 (0=关闭)
@@ -67,17 +67,14 @@ CONFIG = dict(
     auto_reheat=True,              # 是否启用停滞自动重热
     stag_reheat_steps=1500,        # 连续未提升多少步触发自动重热
 
-    # 早停判据 (继承 NO_IMPROVE_STOP 逻辑)
-    # NO_IMPROVE_STOP 在代码下方常量处，可按需改。
-
     # 日志/进度/保存
     progress=True,                 # 是否显示周期进度行
     progress_interval=1.0,         # 进度输出时间间隔 (秒)
     verbose=False,                 # 输出详细 step 级日志 (配合 log_every)
     log_every=500,                 # 每多少步输出一次 verbose 行
-    checkpoint_file="best_p2.json", # 最优解保存文件 (空字符串代表不保存)
-    ckpt_steps=200000,               # 每 N 步保存 (0=关闭)
-    ckpt_seconds=60,                # 每 N 秒保存 (0=关闭)
+    checkpoint_file="best_p3.json", # 最优解保存文件 (空字符串代表不保存)
+    ckpt_steps=200000,             # 每 N 步保存 (0=关闭)
+    ckpt_seconds=60,               # 每 N 秒保存 (0=关闭)
     ckpt_on_improve=True,          # 一旦提升立即保存
 )
 # ================== 结束：只需修改上面 CONFIG ======================
@@ -85,20 +82,20 @@ CONFIG = dict(
 # Bounds / defaults
 SPEED_MIN, SPEED_MAX = 70.0, 140.0
 AZIM_MIN, AZIM_MAX = 0.0, 2.0 * math.pi
-RELEASE_MAX_DEFAULT = 66.0          # 可调: 最大投放时间 (s)
-DELAY_MIN, DELAY_MAX_DEFAULT = 0.0, 20.0   # 起爆延迟范围 (s)
+RELEASE_MAX_DEFAULT = 66.0
+DELAY_MIN, DELAY_MAX_DEFAULT = 0.0, 20.0
+MIN_GAP = 1.0  # 相邻两枚投放间隔 ≥ 1 s
 
 # Annealing defaults
-T0_DEFAULT = 1.0        # 初始温度 (对单位=秒的 occlusion_time, 一般 0~若干秒)
+T0_DEFAULT = 1.0
 T_END_DEFAULT = 1e-3
-ALPHA_DEFAULT = 0.998   # 降温因子
+ALPHA_DEFAULT = 0.98
 STEPS_PER_T_DEFAULT = 50
-NO_IMPROVE_STOP = 200000  # 早停: 若超此步无提升
+NO_IMPROVE_STOP = 200000
 
-# ---------------- 高级扰动 / 退火策略辅助 ----------------
+# ---------------- 工具函数 ----------------
 
 def _rand_cauchy(scale: float) -> float:
-    # 标准 Cauchy 变量: tan(pi*(U-0.5))，再缩放
     u = random.random()
     return math.tan(math.pi * (u - 0.5)) * scale
 
@@ -118,67 +115,110 @@ def _save_checkpoint(best: 'Solution', steps: int, elapsed: float, path: str):
     except Exception as e:
         print(f"[warn] checkpoint save failed: {e}")
 
-@dataclass
-class Solution:
-    speed: float
-    azimuth: float
-    release_time: float
-    explode_delay: float
-    value: float  # objective (occluded time)
-
-    def as_dict(self) -> Dict:
-        return dict(speed=self.speed, azimuth=self.azimuth, release_time=self.release_time,
-                    explode_delay=self.explode_delay, value=self.value)
-
 
 def clip(x, lo, hi):
     return min(max(x, lo), hi)
 
 
 def wrap_angle(a: float) -> float:
-    twopi = 2.0 * math.pi
-    return a % twopi
+    return a % (2.0 * math.pi)
 
 
-def evaluate(speed: float, azimuth: float, release_time: float, explode_delay: float, method: str, dt: float) -> float:
-    """Return occluded time for M1 under given decision."""
-    res = evaluate_problem2(
-        speed=speed,
-        azimuth=azimuth,
-        release_time=release_time,
-        explode_delay=explode_delay,
-        occlusion_method=method,
-        dt=dt,
-    )
+def _sample_release_times(n: int, rel_max: float, min_gap: float = MIN_GAP) -> List[float]:
+    """Sample n nondecreasing times within [0, rel_max] with minimum gap min_gap.
+    Construction: choose base in [0, rel_max - (n-1)*min_gap], then distribute slack
+    as a nondecreasing cumulative sequence.
+    """
+    if rel_max <= 0:
+        return [0.0] * n
+    base_hi = max(0.0, rel_max - (n - 1) * min_gap)
+    base = random.uniform(0.0, base_hi)
+    slack = max(0.0, rel_max - (base + (n - 1) * min_gap))
+    # Build nondecreasing cumulative extras within [0, slack]
+    us = sorted(random.random() for _ in range(n))
+    cum = [0.0 if us[-1] == 0 else slack * (u / us[-1]) for u in us]
+    return [base + i * min_gap + cum[i] for i in range(n)]
+
+
+def _project_times(times: List[float], rel_max: float, min_gap: float = MIN_GAP) -> List[float]:
+    """Project times to satisfy 0<=t<=rel_max, sorted, and min gaps.
+    Forward-backward pass, then shift inside bounds if necessary.
+    """
+    n = len(times)
+    t = sorted(float(x) for x in times)
+    # Forward pass: enforce gaps
+    for i in range(1, n):
+        t[i] = max(t[i], t[i - 1] + min_gap)
+    # Clamp last to rel_max then backward pass if overflow
+    if t[-1] > rel_max:
+        t[-1] = rel_max
+        for i in range(n - 2, -1, -1):
+            t[i] = min(t[i], t[i + 1] - min_gap)
+        # If earliest < 0, shift right and re-enforce
+        if t[0] < 0.0:
+            shift = -t[0]
+            t = [ti + shift for ti in t]
+            for i in range(1, n):
+                t[i] = max(t[i], t[i - 1] + min_gap)
+            if t[-1] > rel_max:
+                # As a fallback, resample feasible times
+                return _sample_release_times(n, rel_max, min_gap)
+    # Final clamp to [0, rel_max]
+    t[0] = clip(t[0], 0.0, rel_max)
+    for i in range(1, n):
+        t[i] = clip(max(t[i], t[i - 1] + min_gap), 0.0, rel_max)
+    # If still infeasible due to rounding, resample
+    if t[-1] > rel_max + 1e-9:
+        return _sample_release_times(n, rel_max, min_gap)
+    return t
+
+
+@dataclass
+class Solution:
+    speed: float
+    azimuth: float
+    bombs: List[Tuple[float, float]]  # [(deploy_time, explode_delay)] length=3
+    value: float  # objective value (occluded time)
+
+    def as_dict(self) -> Dict:
+        d = {
+            "speed": self.speed,
+            "azimuth": self.azimuth,
+            "bombs": [dict(deploy_time=t, explode_delay=dd) for (t, dd) in self.bombs],
+            "value": self.value,
+        }
+        return d
+
+
+# ---------------- 评价与解生成 ----------------
+
+def evaluate(speed: float, azimuth: float, bombs: List[Tuple[float, float]], method: str, dt: float) -> float:
+    res = evaluate_problem3(bombs=bombs, speed=speed, azimuth=azimuth, dt=dt, occlusion_method=method)
     return float(res["occluded_time"]["M1"])
 
 
 def random_initial(rel_max: float, delay_max: float, method: str, dt: float) -> Solution:
-    # Heuristic: start near baseline (120 m/s, heading to fake target -> pi) with slight perturbation
     base_speed = 120.0
-    base_az = math.pi  # FY1 initial pos (17800,0,1800) -> fake target (0,0,0) projection ≈ negative x
+    base_az = math.pi  # 指向假目标的大致反向
     speed = clip(random.gauss(base_speed, 10.0), SPEED_MIN, SPEED_MAX)
     azimuth = wrap_angle(base_az + random.gauss(0.0, 0.15))
-    release_time = random.uniform(0.5, min(5.0, rel_max))  # early releases often good
-    explode_delay = random.uniform(2.0, min(6.0, delay_max))
-    val = evaluate(speed, azimuth, release_time, explode_delay, method, dt)
-    return Solution(speed, azimuth, release_time, explode_delay, val)
+    deploys = _sample_release_times(3, rel_max, MIN_GAP)
+    delays = [random.uniform(2.0, min(6.0, delay_max)) for _ in range(3)]
+    bombs = list(zip(deploys, delays))
+    val = evaluate(speed, azimuth, bombs, method, dt)
+    return Solution(speed, azimuth, bombs, val)
 
 
 def neighbor(sol: Solution, rel_max: float, delay_max: float, method: str, dt: float, temp: float,
-            mode: str = "gauss", cauchy_base: float = 1.0, temp_scale: float = 1.0,
-            mix_p: float = 0.5) -> Solution:
-    """Enhanced neighbor with selectable distribution.
+            mode: str = "mixed", cauchy_base: float = 1.0, temp_scale: float = 1.0, mix_p: float = 0.5) -> Solution:
+    """Enhanced neighbor with selectable distribution for triple-bomb schedule.
     mode: 'gauss' | 'cauchy' | 'mixed'
-    cauchy_base: base scale for Cauchy heavy-tail
-    temp_scale: multiplier on temperature for step size
-    mix_p: probability of choosing gaussian in mixed mode
     """
-    # 温度缩放 + 用户外部缩放
     scale = max(temp * temp_scale, 1e-4)
 
     def d_gauss(s):
         return random.gauss(0.0, s)
+
     def d_cauchy(s):
         return _rand_cauchy(s)
 
@@ -187,35 +227,28 @@ def neighbor(sol: Solution, rel_max: float, delay_max: float, method: str, dt: f
             return d_gauss(s_short)
         elif mode == "cauchy":
             return d_cauchy(s_long)
-        else:  # mixed
+        else:
             return d_gauss(s_short) if random.random() < mix_p else d_cauchy(s_long)
 
-    # 不同维度设置不同的基准尺度（经验）
-    spd = sol.speed + pick(8.0 * scale, cauchy_base * 15.0 * scale)
-    az  = sol.azimuth + pick(0.5 * scale, cauchy_base * 1.2 * scale)
-    rel = sol.release_time + pick(2.0 * scale, cauchy_base * 4.0 * scale)
-    dly = sol.explode_delay + pick(1.0 * scale, cauchy_base * 2.5 * scale)
+    spd = clip(sol.speed + pick(8.0 * scale, cauchy_base * 15.0 * scale), SPEED_MIN, SPEED_MAX)
+    az = wrap_angle(sol.azimuth + pick(0.5 * scale, cauchy_base * 1.2 * scale))
 
-    speed = clip(spd, SPEED_MIN, SPEED_MAX)
-    azimuth = wrap_angle(az)
-    release_time = clip(rel, 0.0, rel_max)
-    explode_delay = clip(dly, DELAY_MIN, delay_max)
+    times = [t for (t, _) in sol.bombs]
+    delays = [d for (_, d) in sol.bombs]
 
-    val = evaluate(speed, azimuth, release_time, explode_delay, method, dt)
-    return Solution(speed, azimuth, release_time, explode_delay, val)
+    # 时间与延时的扰动（不同维度不同尺度）
+    times = [t + pick(2.0 * scale, cauchy_base * 4.0 * scale) for t in times]
+    delays = [clip(d + pick(1.0 * scale, cauchy_base * 2.5 * scale), DELAY_MIN, delay_max) for d in delays]
 
-# 旧 neighbor 保留兼容
-def neighbor_old(sol: Solution, rel_max: float, delay_max: float, method: str, dt: float, temp: float) -> Solution:
-    # Temperature-scaled perturbations
-    scale = max(temp, 1e-3)
-    speed = clip(sol.speed + random.gauss(0.0, 8.0 * scale), SPEED_MIN, SPEED_MAX)
-    azimuth = wrap_angle(sol.azimuth + random.gauss(0.0, 0.5 * scale))
-    release_time = clip(sol.release_time + random.gauss(0.0, 2.0 * scale), 0.0, rel_max)
-    explode_delay = clip(sol.explode_delay + random.gauss(0.0, 1.0 * scale), DELAY_MIN, delay_max)
-    # Ensure explosion occurs within some reasonable horizon (missile flight ~67 s) - implicit by bounds
-    val = evaluate(speed, azimuth, release_time, explode_delay, method, dt)
-    return Solution(speed, azimuth, release_time, explode_delay, val)
+    # 约束投放时间：区间与最小间隔
+    times = _project_times(times, rel_max, MIN_GAP)
 
+    bombs = list(zip(times, delays))
+    val = evaluate(spd, az, bombs, method, dt)
+    return Solution(spd, az, bombs, val)
+
+
+# ---------------- 退火主程序 ----------------
 
 def simulated_annealing(args) -> Solution:
     random.seed(args.seed)
@@ -225,12 +258,10 @@ def simulated_annealing(args) -> Solution:
     t = args.t0
     steps = 0
     last_improve_step = 0
-    last_best_value = best.value
     stagnation_counter = 0
 
     log_every = max(1, args.log_every)
 
-    # 进度&接受率统计
     start_time = time.time()
     last_progress_time = start_time
     accepted_moves_period = 0
@@ -239,7 +270,6 @@ def simulated_annealing(args) -> Solution:
     last_ckpt_steps = 0
     last_ckpt_time = start_time
 
-    # 初始立即保存一次（若指定）
     if args.checkpoint_file:
         _save_checkpoint(best, steps, 0.0, args.checkpoint_file)
 
@@ -247,13 +277,13 @@ def simulated_annealing(args) -> Solution:
         for _ in range(args.steps_per_t):
             steps += 1
 
-            # 触发重启（硬重启: 重新随机当前位置，保留 best）
+            # 重启
             if args.restart_every and steps % args.restart_every == 0 and steps > 0:
                 if args.verbose or args.progress:
                     print(f"[restart] step={steps} keep best={best.value:.4f}")
                 current = random_initial(args.rel_max, args.delay_max, args.method, args.dt)
 
-            # 偶发全局跳跃（soft jump 基于概率）
+            # 全局跳跃
             if args.global_jump_prob > 0 and random.random() < args.global_jump_prob:
                 nj = random_initial(args.rel_max, args.delay_max, args.method, args.dt)
                 if args.accept_worse_jump or nj.value >= current.value:
@@ -269,13 +299,15 @@ def simulated_annealing(args) -> Solution:
                 mode=args.neighbor_mode,
                 cauchy_base=args.cauchy_scale,
                 temp_scale=args.temp_scale,
-                mix_p=args.mixed_gauss_prob
+                mix_p=args.mixed_gauss_prob,
             )
+
             delta = cand.value - current.value
             accepted = False
             if delta >= 0 or math.exp(delta / max(t, 1e-9)) > random.random():
                 current = cand
                 accepted = True
+
             if cand.value > best.value + 1e-12:
                 best = cand
                 last_improve_step = steps
@@ -285,7 +317,7 @@ def simulated_annealing(args) -> Solution:
             else:
                 stagnation_counter += 1
 
-            # 自适应重热: 连续停滞
+            # 自适应重热
             if args.auto_reheat and stagnation_counter >= args.stag_reheat_steps:
                 old_t = t
                 t = min(t * args.reheat_factor, args.t0)
@@ -300,15 +332,9 @@ def simulated_annealing(args) -> Solution:
                 if args.verbose or args.progress:
                     print(f"[periodic reheat] step={steps} T {old_t:.4g} -> {t:.4g}")
 
-            # 更新统计
             total_moves_period += 1
             if accepted:
                 accepted_moves_period += 1
-
-            # 常规 verbose 日志
-            if steps % log_every == 0 and args.verbose:
-                print(f"[step {steps:05d}] T={t:.4f} cur={current.value:.4f} best={best.value:.4f} "
-                      f"(spd={best.speed:.2f}, az={best.azimuth:.3f}, rel={best.release_time:.2f}, delay={best.explode_delay:.2f})")
 
             # 进度输出
             now = time.time()
@@ -317,13 +343,16 @@ def simulated_annealing(args) -> Solution:
                 frac = steps / args.max_steps if args.max_steps > 0 else 0.0
                 eta = elapsed * (1 - frac) / frac if frac > 1e-6 else float('nan')
                 acc_rate = (accepted_moves_period / max(1, total_moves_period))
-                print(f"[prog] {steps}/{args.max_steps} {frac:6.2%} T={t:.4g} best={best.value:.4f}s cur={current.value:.4f}s "
-                      f"acc={acc_rate:5.1%} elapsed={elapsed:6.1f}s ETA={eta:6.1f}s", flush=True)
+                print(
+                    f"[prog] {steps}/{args.max_steps} {frac:6.2%} T={t:.4g} best={best.value:.4f}s "
+                    f"cur={current.value:.4f}s acc={acc_rate:5.1%} elapsed={elapsed:6.1f}s ETA={eta:6.1f}s",
+                    flush=True,
+                )
                 last_progress_time = now
                 accepted_moves_period = 0
                 total_moves_period = 0
 
-            # 周期性 checkpoint
+            # 周期 checkpoint
             if args.checkpoint_file:
                 do_ckpt = False
                 if args.ckpt_steps and (steps - last_ckpt_steps) >= args.ckpt_steps:
@@ -337,12 +366,13 @@ def simulated_annealing(args) -> Solution:
 
             if steps >= args.max_steps:
                 break
-        # 正常降温
+
         t *= args.alpha
         if (steps - last_improve_step) >= NO_IMPROVE_STOP:
             if args.verbose or args.progress:
                 print(f"Early stop: {NO_IMPROVE_STOP} steps no improvement.")
             break
+
     if args.checkpoint_file:
         _save_checkpoint(best, steps, time.time() - start_time, args.checkpoint_file)
     return best
@@ -350,7 +380,6 @@ def simulated_annealing(args) -> Solution:
 
 def _build_args_via_config() -> SimpleNamespace:
     cfg = CONFIG.copy()
-    # 兼容旧字段名称 -> args 属性名
     return SimpleNamespace(
         method=cfg['method'], dt=cfg['dt'], rel_max=cfg['rel_max'], delay_max=cfg['delay_max'],
         t0=cfg['t0'], t_end=cfg['t_end'], alpha=cfg['alpha'], steps_per_t=cfg['steps_per_t'],
@@ -363,19 +392,48 @@ def _build_args_via_config() -> SimpleNamespace:
         progress=cfg['progress'], progress_interval=cfg['progress_interval'],
         verbose=cfg['verbose'], log_every=cfg['log_every'], checkpoint_file=cfg['checkpoint_file'],
         ckpt_steps=cfg['ckpt_steps'], ckpt_seconds=cfg['ckpt_seconds'], ckpt_on_improve=cfg['ckpt_on_improve'],
-        # 兼容旧接口中未使用但代码访问的占位
-        iters=None
+        iters=None,
     )
+
+
+def _export_excel(best: Solution, path: str, total_time: float):
+    """Export the best strategy to an Excel file.
+    Columns include speed, azimuth(deg), for each bomb deploy/explode times, and total occluded time.
+    If pandas/openpyxl is unavailable, print a hint.
+    """
+    try:
+        import pandas as pd
+    except Exception as e:
+        print(f"[warn] pandas not available, cannot write {path}. Please: pip install pandas openpyxl. Error: {e}")
+        return
+
+    az_deg = math.degrees(best.azimuth)
+    rows = [{
+        "speed(m/s)": best.speed,
+        "azimuth(deg)": az_deg,
+        "bomb1_deploy(s)": best.bombs[0][0],
+        "bomb1_explode(s)": best.bombs[0][0] + best.bombs[0][1],
+        "bomb2_deploy(s)": best.bombs[1][0],
+        "bomb2_explode(s)": best.bombs[1][0] + best.bombs[1][1],
+        "bomb3_deploy(s)": best.bombs[2][0],
+        "bomb3_explode(s)": best.bombs[2][0] + best.bombs[2][1],
+        "total_occluded_time(s)": total_time,
+    }]
+    df = pd.DataFrame(rows)
+    try:
+        df.to_excel(path, index=False)
+        print(f"Saved result to {path}")
+    except Exception as e:
+        print(f"[warn] failed to save {path}: {e}")
 
 
 def main():
     import sys
-    use_cli = '--use-cli' in sys.argv  # 若命令行包含 --use-cli 则启用原 argparse
+    use_cli = '--use-cli' in sys.argv
     if not use_cli:
         args = _build_args_via_config()
     else:
-        # 原 argparse 流程 (保留以防需要临时实验)
-        ap = argparse.ArgumentParser(description="Simulated Annealing solver for Problem 2 (maximize M1 occlusion time)")
+        ap = argparse.ArgumentParser(description="Simulated Annealing solver for Problem 3 (maximize M1 occlusion time, 3 bombs)")
         ap.add_argument('--use-cli', action='store_true', help='explicitly use CLI args (internal)')
         ap.add_argument("--method", choices=["judge_caps", "sampling"], default="judge_caps")
         ap.add_argument("--dt", type=float, default=0.05)
@@ -413,7 +471,6 @@ def main():
         if not args.checkpoint_file:
             args.checkpoint_file = ""
 
-    # 兼容: 若配置 seed 为 None, 则使用当前时间随机
     if args.seed is None:
         args.seed = int(time.time() * 1000) % 2_000_000_000
 
@@ -421,19 +478,18 @@ def main():
     best = simulated_annealing(args)
     t_end = time.time()
 
-    print("=== Simulated Annealing Result (Problem 2) ===")
+    print("=== Simulated Annealing Result (Problem 3, 3 bombs) ===")
     print(f"Best occluded time: {best.value:.4f} s")
     print(f"Speed: {best.speed:.3f} m/s")
     print(f"Azimuth: {best.azimuth:.6f} rad  (deg={math.degrees(best.azimuth):.2f})")
-    print(f"Release time: {best.release_time:.3f} s")
-    print(f"Explode delay: {best.explode_delay:.3f} s (explode @ {best.release_time + best.explode_delay:.3f} s)")
+    for i, (t_rel, dly) in enumerate(best.bombs, 1):
+        print(f"Bomb{i}: deploy={t_rel:.3f} s, explode_delay={dly:.3f} s (explode @ {t_rel + dly:.3f} s)")
 
+    # 验证（如采用 judge_caps 则用 sampling 再评一次）
     if args.method == "judge_caps":
         try:
-            res_sampling = evaluate_problem2(
-                speed=best.speed, azimuth=best.azimuth,
-                release_time=best.release_time, explode_delay=best.explode_delay,
-                occlusion_method="sampling", dt=args.dt
+            res_sampling = evaluate_problem3(
+                bombs=best.bombs, speed=best.speed, azimuth=best.azimuth, dt=args.dt, occlusion_method="sampling"
             )
             v2 = float(res_sampling["occluded_time"]["M1"])
             print(f"(Sampling verification) Occluded time: {v2:.4f} s")
@@ -441,6 +497,14 @@ def main():
             print(f"Sampling verification failed: {e}")
 
     print(f"Runtime: {t_end - t_start:.2f} s | Steps: {args.max_steps}")
+
+    # 导出 Excel 结果
+    try:
+        total_time = float(best.value)
+        _export_excel(best, path="result1.xlsx", total_time=total_time)
+    except Exception as e:
+        print(f"Export failed: {e}")
+
 
 if __name__ == "__main__":
     main()
